@@ -48,6 +48,9 @@ from common.ui import (
     render_card,
     render_step,
     render_takeaways,
+    render_training_metrics_table,
+    silence_hf_logs,
+    silence_trainer,
     status_spinner,
 )
 
@@ -166,11 +169,10 @@ def create_training_args(output_dir: str) -> Seq2SeqTrainingArguments:
         auto_find_batch_size=True,
         learning_rate=LEARNING_RATE,
         num_train_epochs=EPOCHS,
-        logging_dir=f"{output_dir}/logs",
-        logging_strategy="steps",
-        logging_steps=500,
+        logging_strategy="epoch",
         save_strategy="no",
-        report_to="tensorboard",
+        disable_tqdm=True,
+        report_to="none",
     )
 
 
@@ -221,6 +223,8 @@ def render_param_stats_table(stats: LoRAParamStats) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     """Execute functional dialogue summarization with FLAN-T5 and LoRA."""
+    silence_hf_logs()
+
     render_banner(
         title="Dialogue Summarization with FLAN-T5 & PEFT LoRA",
         subtitle="Chapter 2: Domain-Specific Small Language Models",
@@ -284,16 +288,24 @@ def main() -> None:
         train_dataset=tokenized_dataset["train"],
         eval_dataset=tokenized_dataset["validation"],
     )
+    silence_trainer(trainer)
 
-    with status_spinner("Training LoRA adapter weights..."):
-        trainer.train()
+    with status_spinner(f"Training LoRA adapter weights for {EPOCHS} epoch(s)..."):
+        train_output = trainer.train()
+
+    render_training_metrics_table(trainer.state.log_history, title="PEFT LoRA Training Progression")
 
     save_dir = f"{OUTPUT_DIR}/peft_model_{int(current_time())}"
     peft_model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
     render_card(
-        "Checkpoint Saved",
-        f"LoRA adapter weights successfully saved to:\n[text.highlight]{save_dir}[/text.highlight]",
+        "Training Status & Checkpoint Saved",
+        (
+            f"[status.success]PEFT LoRA fine-tuning completed successfully.[/status.success]\n"
+            f"[text.muted]Total Runtime:[/text.muted] [brand.secondary]{train_output.metrics.get('train_runtime', 0):.2f}s[/brand.secondary]  •  "
+            f"[text.muted]Final Train Loss:[/text.muted] [status.warning]{train_output.metrics.get('train_loss', 0):.4f}[/status.warning]\n"
+            f"[text.muted]Checkpoint Saved To:[/text.muted] [text.highlight]{save_dir}[/text.highlight]"
+        ),
         icon="💾",
     )
 

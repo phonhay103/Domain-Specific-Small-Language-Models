@@ -19,6 +19,9 @@ from common.ui import (
     render_code_block,
     render_step,
     render_takeaways,
+    render_training_metrics_table,
+    silence_hf_logs,
+    silence_trainer,
     status_spinner,
 )
 
@@ -39,5 +42,8 @@ __all__ = [
     "render_code_block",
     "render_step",
     "render_takeaways",
+    "render_training_metrics_table",
+    "silence_hf_logs",
+    "silence_trainer",
     "status_spinner",
 ]

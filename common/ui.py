@@ -55,6 +55,16 @@ EYE_FRIENDLY_THEME = Theme(
         "muted": COLOR_MUTED,
         "dim": COLOR_DIM,
         "border": COLOR_BORDER,
+        # Extended dot-notated semantic styles used across notebook scripts
+        "text.muted": COLOR_MUTED,
+        "text.dim": COLOR_DIM,
+        "text.main": COLOR_TEXT,
+        "text.highlight": f"bold {COLOR_GOLD}",
+        "brand.primary": f"bold {COLOR_PRIMARY}",
+        "brand.secondary": COLOR_SECONDARY,
+        "status.success": f"bold {COLOR_SUCCESS}",
+        "status.warning": f"bold {COLOR_WARNING}",
+        "status.error": f"bold {COLOR_ERROR}",
     }
 )
 
@@ -185,3 +195,99 @@ def status_spinner(message: str) -> Generator[None, None, None]:
     """Provide a quiet, smooth spinner for async/heavy processing."""
     with console.status(f"[dim]⠋[/dim] [primary]{message}[/primary]", spinner="dots"):
         yield
+
+
+def silence_hf_logs() -> None:
+    """Silence noisy third-party logging, telemetry, and unstyled progress bars."""
+    import logging
+    import os
+    import warnings
+
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+    os.environ["DS_BUILD_OPS"] = "0"
+    warnings.filterwarnings("ignore")
+
+    for logger_name in ("transformers", "datasets", "urllib3", "torch", "accelerate", "deepspeed"):
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+    try:
+        import deepspeed.utils.logging as ds_logging
+
+        ds_logging.logger.setLevel(logging.ERROR)
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        import datasets
+
+        datasets.disable_progress_bar()
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        import transformers
+
+        transformers.logging.set_verbosity_error()
+        transformers.logging.disable_progress_bar()
+    except (ImportError, AttributeError):
+        pass
+
+
+def silence_trainer(trainer: Any) -> None:
+    """Remove raw stdout PrinterCallback / ProgressCallback from Hugging Face Trainer."""
+    try:
+        from transformers.trainer_callback import PrinterCallback, ProgressCallback
+
+        trainer.remove_callback(PrinterCallback)
+        trainer.remove_callback(ProgressCallback)
+    except (ImportError, AttributeError, ValueError):
+        pass
+
+
+def render_training_metrics_table(
+    log_history: Sequence[Mapping[str, Any]],
+    title: str = "Fine-Tuning Metrics per Epoch",
+) -> None:
+    """Render a clean, formatted table of training and evaluation metrics across epochs."""
+    epoch_data: dict[int, dict[str, Any]] = {}
+    for entry in log_history:
+        if "epoch" in entry:
+            epoch = round(float(entry["epoch"]))
+            if epoch not in epoch_data:
+                epoch_data[epoch] = {}
+            if "loss" in entry:
+                epoch_data[epoch]["train_loss"] = f"{entry['loss']:.4f}"
+            if "eval_loss" in entry:
+                epoch_data[epoch]["eval_loss"] = f"{entry['eval_loss']:.4f}"
+            if "eval_runtime" in entry:
+                epoch_data[epoch]["eval_runtime"] = f"{entry['eval_runtime']:.2f}s"
+            if "eval_samples_per_second" in entry:
+                epoch_data[epoch]["throughput"] = f"{float(entry['eval_samples_per_second']):.1f} smp/s"
+
+    if not epoch_data:
+        return
+
+    columns = [
+        ("Epoch", STYLE_INDEX, "center"),
+        ("Train Loss", STYLE_PRIMARY, "center"),
+        ("Validation Loss", STYLE_SUCCESS, "center"),
+        ("Eval Latency", STYLE_NUMBER, "center"),
+        ("Eval Throughput", STYLE_TEXT, "right"),
+    ]
+    rows = []
+    for ep, metrics in sorted(epoch_data.items()):
+        rows.append(
+            [
+                f"Epoch {ep}",
+                metrics.get("train_loss", "—"),
+                metrics.get("eval_loss", "—"),
+                metrics.get("eval_runtime", "—"),
+                metrics.get("throughput", "—"),
+            ]
+        )
+
+    console.print(create_table(title, columns, rows))
+    pause()
+

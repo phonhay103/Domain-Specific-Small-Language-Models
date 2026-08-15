@@ -19,6 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Third-party
+import torch
 from datasets import Dataset, load_dataset
 from transformers import (
     AutoModelForQuestionAnswering,
@@ -26,7 +27,6 @@ from transformers import (
     DefaultDataCollator,
     Trainer,
     TrainingArguments,
-    pipeline,
 )
 
 # Common functional & UI utilities
@@ -42,6 +42,9 @@ from common.ui import (
     render_card,
     render_step,
     render_takeaways,
+    render_training_metrics_table,
+    silence_hf_logs,
+    silence_trainer,
     status_spinner,
 )
 
@@ -67,6 +70,7 @@ class SpanIndices:
     end_token: int
 
 
+DATASET_ID = "rajpurkar/squad"
 MODEL_ID = "distilbert/distilbert-base-uncased"
 MAX_LENGTH = 384
 STRIDE = 128
@@ -151,13 +155,70 @@ def create_training_arguments(output_dir: str) -> TrainingArguments:
     return TrainingArguments(
         output_dir=output_dir,
         eval_strategy="epoch",
+        logging_strategy="epoch",
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         num_train_epochs=3,
         weight_decay=0.01,
         push_to_hub=False,
+        disable_tqdm=True,
+        report_to="none",
+        save_strategy="no",
     )
+
+
+def predict_extractive_answer(
+    model: Any,
+    tokenizer: Any,
+    question: str,
+    context: str,
+) -> dict[str, Any]:
+    """Pure inference function: predicts answer span from context via model logits."""
+    inputs = tokenizer(question, context, return_tensors="pt", return_offsets_mapping=True)
+    offset_mapping = inputs.pop("offset_mapping")[0]
+    sequence_ids = inputs.sequence_ids(0)
+
+    device = next(model.parameters()).device
+    inputs_on_device = {k: v.to(device) for k, v in inputs.items()}
+
+    model.eval()
+    with torch.no_grad():
+        outputs = model(**inputs_on_device)
+
+    start_logits = outputs.start_logits[0].cpu()
+    end_logits = outputs.end_logits[0].cpu()
+
+    # Context token indices (where sequence_id == 1)
+    context_indices = [i for i, sid in enumerate(sequence_ids) if sid == 1]
+    if not context_indices:
+        return {"answer": "", "score": 0.0, "start": 0, "end": 0}
+
+    best_score = -float("inf")
+    best_start, best_end = context_indices[0], context_indices[0]
+
+    start_probs = torch.softmax(start_logits, dim=-1)
+    end_probs = torch.softmax(end_logits, dim=-1)
+
+    for s in context_indices:
+        for e in context_indices:
+            if s <= e and (e - s < 30):
+                score = (start_logits[s] + end_logits[e]).item()
+                if score > best_score:
+                    best_score = score
+                    best_start, best_end = s, e
+
+    prob_score = (start_probs[best_start] * end_probs[best_end]).item()
+    start_char = int(offset_mapping[best_start][0])
+    end_char = int(offset_mapping[best_end][1])
+    answer = context[start_char:end_char]
+
+    return {
+        "answer": answer,
+        "score": float(prob_score),
+        "start": start_char,
+        "end": end_char,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +245,8 @@ def render_sample_table(sample: QASample) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     """Execute SQuAD extractive question-answering training workflow."""
+    silence_hf_logs()
+
     render_banner(
         title="Fine-Tuning DistilBERT on SQuAD with Span Mapping",
         subtitle="Chapter 2: Domain-Specific Small Language Models",
@@ -198,8 +261,8 @@ def main() -> None:
     # Step 1: Loading Dataset & Tokenizer
     render_step(1, "Loading SQuAD Dataset & Subword Tokenizer", icon="📋")
     with status_spinner("Loading SQuAD dataset partition from Hugging Face..."):
-        squad_train = load_dataset("squad", split=f"train[:{TRAIN_SAMPLES}]")
-        squad_eval = load_dataset("squad", split=f"validation[:{EVAL_SAMPLES}]")
+        squad_train = load_dataset(DATASET_ID, split=f"train[:{TRAIN_SAMPLES}]")
+        squad_eval = load_dataset(DATASET_ID, split=f"validation[:{EVAL_SAMPLES}]")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
     first_item = squad_train[0]
@@ -246,21 +309,32 @@ def main() -> None:
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=DefaultDataCollator(),
     )
+    silence_trainer(trainer)
 
     # Step 4: Training Execution
     render_step(4, "Executing DistilBERT Fine-Tuning", icon="🏋️")
-    with status_spinner("Running fine-tuning loop..."):
-        trainer.train()
-    render_card("Training Status", "DistilBERT fine-tuning completed successfully.", icon="✔")
+    with status_spinner("Running 3-epoch fine-tuning & evaluation loop..."):
+        train_output = trainer.train()
+
+    render_training_metrics_table(trainer.state.log_history, title="DistilBERT Fine-Tuning Progression")
+    render_card(
+        "Training Status",
+        (
+            f"[status.success]DistilBERT fine-tuning completed successfully.[/status.success]\n"
+            f"[text.muted]Total Runtime:[/text.muted] [brand.secondary]{train_output.metrics.get('train_runtime', 0):.2f}s[/brand.secondary]  •  "
+            f"[text.muted]Throughput:[/text.muted] [text.highlight]{train_output.metrics.get('train_samples_per_second', 0):.1f} samples/s[/text.highlight]  •  "
+            f"[text.muted]Final Train Loss:[/text.muted] [status.warning]{train_output.metrics.get('train_loss', 0):.4f}[/status.warning]"
+        ),
+        icon="✔",
+    )
 
     # Step 5: Extractive QA Pipeline Inference
     render_step(5, "Evaluating Extractive QA Pipeline", icon="🎯")
     with status_spinner("Running extractive span prediction..."):
-        question_answerer = pipeline("question-answering", model=model, tokenizer=tokenizer)
-        prediction = question_answerer(question=SAMPLE_QUESTION, context=SAMPLE_CONTEXT)
+        prediction = predict_extractive_answer(model, tokenizer, SAMPLE_QUESTION, SAMPLE_CONTEXT)
 
     render_card(
         title="Extractive QA Inference Result",

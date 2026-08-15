@@ -78,7 +78,7 @@ class LengthPercentiles:
 
 
 MODEL_ID = "google/flan-t5-base"
-DATASET_ID = "samsum"
+DATASET_ID = "knkarthick/samsum"
 MAX_SOURCE_LENGTH = 512
 MAX_TARGET_LENGTH = 50
 LORA_R = 16

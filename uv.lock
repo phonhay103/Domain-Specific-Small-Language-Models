@@ -390,6 +390,45 @@ wheels = [
 ]
 
 [[package]]
+name = "domain-specific-small-language-models"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "accelerate" },
+    { name = "datasets" },
+    { name = "evaluate" },
+    { name = "faiss-cpu" },
+    { name = "numpy" },
+    { name = "optuna" },
+    { name = "pandas" },
+    { name = "peft" },
+    { name = "scikit-learn" },
+    { name = "sentence-transformers" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+    { name = "trl" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", specifier = ">=1.14.0" },
+    { name = "datasets", specifier = ">=5.0.1" },
+    { name = "evaluate", specifier = ">=0.4.6" },
+    { name = "faiss-cpu", specifier = ">=1.15.0" },
+    { name = "numpy", specifier = ">=2.5.2" },
+    { name = "optuna", specifier = ">=4.9.0" },
+    { name = "pandas", specifier = ">=3.0.5" },
+    { name = "peft", specifier = ">=0.20.0" },
+    { name = "scikit-learn", specifier = ">=1.9.0" },
+    { name = "sentence-transformers", specifier = ">=5.7.0" },
+    { name = "torch", specifier = ">=2.13.0" },
+    { name = "tqdm", specifier = ">=4.70.0" },
+    { name = "transformers", specifier = ">=5.15.0" },
+    { name = "trl", specifier = ">=1.10.0" },
+]
+
+[[package]]
 name = "evaluate"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -491,45 +530,6 @@ wheels = [
 [package.optional-dependencies]
 http = [
     { name = "aiohttp" },
-]
-
-[[package]]
-name = "gpt2-finetuning"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "accelerate" },
-    { name = "datasets" },
-    { name = "evaluate" },
-    { name = "faiss-cpu" },
-    { name = "numpy" },
-    { name = "optuna" },
-    { name = "pandas" },
-    { name = "peft" },
-    { name = "scikit-learn" },
-    { name = "sentence-transformers" },
-    { name = "torch" },
-    { name = "tqdm" },
-    { name = "transformers" },
-    { name = "trl" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", specifier = ">=1.14.0" },
-    { name = "datasets", specifier = ">=5.0.1" },
-    { name = "evaluate", specifier = ">=0.4.6" },
-    { name = "faiss-cpu", specifier = ">=1.15.0" },
-    { name = "numpy", specifier = ">=2.5.2" },
-    { name = "optuna", specifier = ">=4.9.0" },
-    { name = "pandas", specifier = ">=3.0.5" },
-    { name = "peft", specifier = ">=0.20.0" },
-    { name = "scikit-learn", specifier = ">=1.9.0" },
-    { name = "sentence-transformers", specifier = ">=5.7.0" },
-    { name = "torch", specifier = ">=2.13.0" },
-    { name = "tqdm", specifier = ">=4.70.0" },
-    { name = "transformers", specifier = ">=5.15.0" },
-    { name = "trl", specifier = ">=1.10.0" },
 ]
 
 [[package]]

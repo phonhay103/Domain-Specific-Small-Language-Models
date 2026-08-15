@@ -46,6 +46,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     render_training_metrics_table,
@@ -269,6 +270,7 @@ def main() -> None:
         base_model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID)
         lora_config = create_lora_config()
         peft_model = get_peft_model(base_model, lora_config)
+    render_device_info(peft_model.device, model=peft_model)
 
     trainable_p, total_p = peft_model.get_nb_trainable_parameters()
     stats = LoRAParamStats(

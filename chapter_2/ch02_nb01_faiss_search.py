@@ -34,6 +34,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -169,6 +170,7 @@ def main() -> None:
     render_step(2, "Generating Dense Embeddings & Building Index", icon="🧠")
     with status_spinner(f"Loading SentenceTransformer '{MODEL_ID}'..."):
         model = SentenceTransformer(MODEL_ID)
+    render_device_info(model.device, model=model)
 
     corpus_texts = extract_texts(CORPUS)
     with status_spinner("Encoding corpus texts into 768-dimensional embeddings..."):

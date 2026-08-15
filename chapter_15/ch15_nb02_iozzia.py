@@ -53,6 +53,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -420,6 +421,7 @@ def main() -> None:
     # Step 2: Model & GRPO Trainer Setup
     render_step(2, "Initializing 4-bit Unsloth QLoRA Base Model & GRPO Trainer", icon="🧠")
     model, tokenizer = load_model_for_grpo()
+    render_device_info("cuda" if torch.cuda.is_available() else "cpu", model=model)
     trainer = build_grpo_trainer(model, tokenizer, train_dataset, test_dataset)
 
     # Step 3: Baseline Inference (Before GRPO)
@@ -430,8 +432,8 @@ def main() -> None:
 
     # Step 4: Executing GRPO Reinforcement Learning
     render_step(4, f"Executing GRPO Policy Gradient Optimization ({MAX_STEPS} steps)", icon="🏋️")
-    with status_spinner("Running GRPO training with multi-objective format & accuracy rewards..."):
-        trainer.train()
+    console.print("[bold green]Running GRPO training with multi-objective format & accuracy rewards...[/bold green]")
+    trainer.train()
 
     with open(TRAINING_LOG_FILE, "w") as f:
         f.write("Training completed.\n")

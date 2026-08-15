@@ -42,6 +42,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -70,7 +71,7 @@ class SequenceLengthScalingRow:
     opt_fp16_ms: float
 
 
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_ID = "openai-community/gpt2"
 MODEL_SAVE_PATH = Path("gpt2")
 ONNX_MODEL_PATH = "gpt2_onnx.onnx"
@@ -78,7 +79,11 @@ OPTIMIZED_ONNX_PATH = "gpt2_optimized.onnx"
 OPTIMIZED_FP16_MODEL_PATH = "optimized_fp16.onnx"
 BENCHMARK_PROMPT = "Today is Saturday and"
 MAX_SEQUENCE_LENGTH = 1024
-ORT_PROVIDERS = ["CPUExecutionProvider"]
+ORT_PROVIDERS = (
+    ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    if torch.cuda.is_available()
+    else ["CPUExecutionProvider"]
+)
 BENCHMARK_SEQUENCE_LENGTHS = (1, 4, 64, 256, 512, 1024)
 BENCHMARK_WARMUP_RUNS = 10
 BENCHMARK_TIMED_RUNS = 100
@@ -154,8 +159,7 @@ def main() -> None:
         tokenizer = GPT2Tokenizer.from_pretrained(MODEL_ID)
         model: GPT2Model = GPT2Model.from_pretrained(MODEL_ID)
         model.eval()
-        model.save_pretrained(MODEL_SAVE_PATH)
-
+        render_device_info(DEVICE, model=model)
     inputs_base = tokenizer(BENCHMARK_PROMPT, return_tensors="pt").to(DEVICE)
     pt_ms = measure_fn_latency_ms(lambda m=model, inp=inputs_base: m(**inp))
     render_card("PyTorch Baseline", f"PyTorch CPU Latency: [brand.secondary]{pt_ms:.3f} ms[/brand.secondary]", icon="✔")

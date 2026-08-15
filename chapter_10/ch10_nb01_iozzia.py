@@ -41,6 +41,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -231,7 +232,9 @@ def export_to_onnx(model: GPT2LMHeadModel, tokenizer: AutoTokenizer) -> None:
     model.eval()
 
 
-def _get_example_inputs_with_config(prompt_text, tokenizer, model_config, device: str = "cpu"):
+def _get_example_inputs_with_config(
+    prompt_text, tokenizer, model_config, device: str = "cuda" if torch.cuda.is_available() else "cpu"
+):
     """Prepare tokenized inputs using explicit model config values."""
     num_attention_heads = model_config.n_head
     hidden_size = model_config.n_embd
@@ -354,6 +357,7 @@ def main() -> None:
     # Step 1: Loading and Verifying PyTorch Model
     render_step(1, "Loading and Verifying PyTorch Model", icon="📋")
     model, tokenizer = load_model_and_tokenizer()
+    render_device_info("cuda" if torch.cuda.is_available() else "cpu", model=model)
     verify_vanilla_model(model, tokenizer)
 
     # Step 2: Exporting PyTorch Model to ONNX Graph

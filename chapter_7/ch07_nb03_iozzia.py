@@ -16,10 +16,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-# Ensure root workspace is on pythonpath
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-# Third-party
 import numpy as np
 import pandas as pd
 import torch
@@ -44,9 +40,9 @@ from common.ui import (
     create_table,
     pause,
     render_banner,
-    render_device_info,
     render_card,
     render_code_block,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -184,8 +180,8 @@ def main() -> None:
     with status_spinner(f"Loading '{MODEL_ID}' in bfloat16 onto {device}..."):
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype=torch.bfloat16)
-        model.eval()
         vanilla_pipe = create_code_pipe(model, tokenizer)
+    render_device_info(device, model=model)
 
     sample_out = vanilla_pipe(BENCHMARK_PROMPT)[0]["generated_text"]
     render_code_block(sample_out, language="python", title="Vanilla StarCoder2 Output Preview")

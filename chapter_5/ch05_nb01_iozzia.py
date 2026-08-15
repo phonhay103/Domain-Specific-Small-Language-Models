@@ -50,6 +50,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -196,6 +197,9 @@ def main() -> None:
     # Step 2: Training PyTorch BERT Model
     render_step(2, "Fine-Tuning BERT on MRPC Demo Subset", icon="🏋️")
     pt_model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID, num_labels=2)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pt_model.to(device)
+    render_device_info(device, model=pt_model)
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         eval_strategy="epoch",
@@ -205,7 +209,10 @@ def main() -> None:
         num_train_epochs=2,
         weight_decay=0.01,
         save_strategy="epoch",
-        logging_steps=50,
+        logging_strategy="steps",
+        logging_steps=10,
+        fp16=torch.cuda.is_available(),
+        disable_tqdm=False,
         report_to="none",
     )
     trainer = Trainer(
@@ -216,14 +223,15 @@ def main() -> None:
         processing_class=tokenizer,
         compute_metrics=compute_evaluation_metrics,
     )
-    with status_spinner("Running fine-tuning loop..."):
-        trainer.train()
+    console.print("[bold green]Running fine-tuning loop...[/bold green]")
+    trainer.train()
 
     # Step 3: Exporting to ONNX Format
     render_step(3, "Exporting Static Computation DAG to ONNX", icon="⚙️")
     dummy_input = tokenizer(
         "Sample text for tracing ONNX graph.", return_tensors="pt", padding="max_length", max_length=128
     )
+    dummy_input = {k: v.to(pt_model.device) for k, v in dummy_input.items()}
     pt_model.eval()
     with status_spinner("Tracing PyTorch computation graph..."):
         torch.onnx.export(
@@ -259,14 +267,14 @@ def main() -> None:
 
     # Step 5: Numerical Parity Verification
     render_step(5, "Verifying Numerical Parity against PyTorch Eager", icon="🔍")
-    inputs = tokenizer(BENCHMARK_PROMPT, return_tensors="pt", padding="max_length", max_length=128)
+    inputs = tokenizer(BENCHMARK_PROMPT, return_tensors="pt", padding="max_length", max_length=128).to(pt_model.device)
     with torch.no_grad():
         pt_logits = pt_model(**inputs).logits.cpu().numpy()
 
     ort_inputs = {
-        "input_ids": inputs["input_ids"].numpy(),
-        "attention_mask": inputs["attention_mask"].numpy(),
-        "token_type_ids": inputs["token_type_ids"].numpy(),
+        "input_ids": inputs["input_ids"].cpu().numpy(),
+        "attention_mask": inputs["attention_mask"].cpu().numpy(),
+        "token_type_ids": inputs["token_type_ids"].cpu().numpy(),
     }
 
     base_sess = ort.InferenceSession(BASE_ONNX_PATH, providers=["CPUExecutionProvider"])

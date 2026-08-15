@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Third-party
 import evaluate
 import numpy as np
+import torch
 from datasets import DatasetDict, concatenate_datasets, load_dataset
 from peft import AutoPeftModelForSeq2SeqLM, LoraConfig, TaskType, get_peft_model
 from transformers import (
@@ -170,9 +171,11 @@ def create_training_args(output_dir: str) -> Seq2SeqTrainingArguments:
         auto_find_batch_size=True,
         learning_rate=LEARNING_RATE,
         num_train_epochs=EPOCHS,
-        logging_strategy="epoch",
+        logging_strategy="steps",
+        logging_steps=1,
+        fp16=torch.cuda.is_available(),
         save_strategy="no",
-        disable_tqdm=True,
+        disable_tqdm=False,
         report_to="none",
     )
 
@@ -267,7 +270,9 @@ def main() -> None:
     # Step 3: Initializing PEFT LoRA Model
     render_step(3, "Configuring LoRA Low-Rank Decomposition Adapters", icon="🧠")
     with status_spinner(f"Injecting LoRA adapters into '{MODEL_ID}' attention layers..."):
-        base_model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID)
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(
+            MODEL_ID, device_map="auto" if torch.cuda.is_available() else None
+        )
         lora_config = create_lora_config()
         peft_model = get_peft_model(base_model, lora_config)
     render_device_info(peft_model.device, model=peft_model)
@@ -290,10 +295,8 @@ def main() -> None:
         train_dataset=tokenized_dataset["train"],
         eval_dataset=tokenized_dataset["validation"],
     )
-    silence_trainer(trainer)
-
-    with status_spinner(f"Training LoRA adapter weights for {EPOCHS} epoch(s)..."):
-        train_output = trainer.train()
+    console.print(f"[bold green]Training LoRA adapter weights for {EPOCHS} epoch(s)...[/bold green]")
+    train_output = trainer.train()
 
     render_training_metrics_table(trainer.state.log_history, title="PEFT LoRA Training Progression")
 

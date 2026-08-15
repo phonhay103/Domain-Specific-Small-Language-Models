@@ -47,6 +47,7 @@ from common.ui import (
     render_banner,
     render_card,
     render_code_block,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -156,7 +157,10 @@ def run_optuna_objective(
         per_device_train_batch_size=2,
         per_device_eval_batch_size=2,
         eval_strategy="epoch",
-        logging_steps=10,
+        logging_strategy="steps",
+        logging_steps=1,
+        fp16=torch.cuda.is_available(),
+        disable_tqdm=False,
         save_strategy="no",
         report_to="none",
     )
@@ -275,41 +279,45 @@ def main() -> None:
 
     # Step 4: Fine-Tuning with Optimal Parameters
     render_step(4, "Fine-Tuning Model with Optimal Hyperparameters", icon="🏋️")
-    with status_spinner("Training final model with best LoRA rank and learning rate..."):
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-        )
-        lora_config = LoraConfig(
-            r=best_config.lora_r,
-            lora_alpha=best_config.lora_r * 2,
-            target_modules=["q_proj", "v_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, lora_config)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto",
+    )
+    render_device_info(model.device, model=model)
+    lora_config = LoraConfig(
+        r=best_config.lora_r,
+        lora_alpha=best_config.lora_r * 2,
+        target_modules=["q_proj", "v_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_config)
 
-        training_args = TrainingArguments(
-            output_dir=f"{OUTPUT_DIR}/best_model",
-            learning_rate=best_config.learning_rate,
-            num_train_epochs=best_config.num_epochs,
-            per_device_train_batch_size=2,
-            eval_strategy="no",
-            save_strategy="epoch",
-            report_to="none",
-        )
+    training_args = TrainingArguments(
+        output_dir=f"{OUTPUT_DIR}/best_model",
+        learning_rate=best_config.learning_rate,
+        num_train_epochs=best_config.num_epochs,
+        per_device_train_batch_size=2,
+        eval_strategy="no",
+        logging_strategy="steps",
+        logging_steps=1,
+        fp16=torch.cuda.is_available(),
+        disable_tqdm=False,
+        save_strategy="epoch",
+        report_to="none",
+    )
 
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
-            data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8),
-        )
-        trainer.train()
-
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8),
+    )
+    console.print("[bold green]Starting final fine-tuning with optimal hyperparameters...[/bold green]")
+    trainer.train()
     render_card(
         "Model Checkpoint",
         f"Optimal model weights saved to:\n[text.highlight]{OUTPUT_DIR}/best_model[/text.highlight]",

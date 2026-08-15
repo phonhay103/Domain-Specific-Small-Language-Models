@@ -37,6 +37,7 @@ from common.ui import (
     render_banner,
     render_card,
     render_code_block,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -162,6 +163,7 @@ def main() -> None:
             config = AutoConfig.from_pretrained(os.path.join(model_dir, "config.json"))
             model = AutoModelForCausalLM.from_pretrained(model_dir, config=config)
             model.save_pretrained(hf_output_dir)
+        render_device_info("cuda" if torch.cuda.is_available() else "cpu", model=model)
         render_card("Hub Artifacts Ready", f"Exported to [text.highlight]{hf_output_dir}[/text.highlight]", icon="✨")
     else:
         render_card(

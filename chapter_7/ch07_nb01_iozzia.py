@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Third-party
 import numpy as np
 import pandas as pd
+import torch
 from optimum.onnxruntime import ORTModelForCausalLM, ORTQuantizer
 from optimum.onnxruntime.configuration import AutoQuantizationConfig
 from transformers import AutoTokenizer, CodeGenForCausalLM, pipeline
@@ -42,6 +43,7 @@ from common.ui import (
     render_banner,
     render_card,
     render_code_block,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -69,7 +71,7 @@ MODEL_ID = "Salesforce/codegen-350M-mono"
 LOCAL_CHECKPOINT_DIR = "local-pt-checkpoint"
 ONNX_PATH = Path("onnx")
 QUANTIZED_MODEL_FILE = "model_quantized.onnx"
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PAD_TOKEN_ID = 50256
 MAX_GEN_LENGTH = 12
 BENCHMARK_PROMPT = "def hello_world():"
@@ -179,6 +181,7 @@ def main() -> None:
         pt_model = CodeGenForCausalLM.from_pretrained(MODEL_ID).to(DEVICE)
         pt_model.eval()
         pt_pipe = create_generation_pipe(pt_model, tokenizer)
+    render_device_info(DEVICE, model=pt_model)
 
     sample_out = pt_pipe(BENCHMARK_PROMPT)[0]["generated_text"]
     render_code_block(sample_out, language="python", title="PyTorch Code Generation Preview")

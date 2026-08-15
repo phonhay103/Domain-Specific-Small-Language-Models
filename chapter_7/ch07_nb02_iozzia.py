@@ -700,9 +700,9 @@ def main() -> None:
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    render_device_info(device, model=model)
     render_step(1, "Loading Model and HumanEval Problem Set", icon="📋")
     model, tokenizer = load_model_and_tokenizer(MODEL_ID, device)
+    render_device_info(device, model=model)
     problems = read_problems_local(PROBLEMS_FILE_PATH)
     render_card(
         "Problems Loaded",

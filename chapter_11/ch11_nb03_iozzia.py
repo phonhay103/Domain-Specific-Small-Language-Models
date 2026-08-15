@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
+
 # Ensure root workspace is on pythonpath
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,6 +33,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -99,6 +102,7 @@ def main() -> None:
 
     # Step 1: Inspecting Architecture
     render_step(1, "Inspecting Compiled Native Runtime Specification", icon="📋")
+    render_device_info("cuda" if torch.cuda.is_available() else "cpu")
     render_mlc_spec_table(DEFAULT_SPEC)
 
     # Step 2: Initializing MLCEngine

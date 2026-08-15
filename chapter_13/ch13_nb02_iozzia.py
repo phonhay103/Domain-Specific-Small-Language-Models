@@ -36,6 +36,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -215,6 +216,7 @@ def main() -> None:
                 verbosity_level=2,
                 max_steps=AGENT_MAX_STEPS,
             )
+        render_device_info("cuda" if torch.cuda.is_available() else "cpu", model=model.model)
         render_card("Agent Initialized", "CodeAgent configured with Python code action space.", icon="✔")
 
         # Step 3: Running Autonomous Agent

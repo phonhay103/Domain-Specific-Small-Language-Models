@@ -42,6 +42,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -145,7 +146,7 @@ def main() -> None:
         tokenizer = GPT2Tokenizer.from_pretrained(MODEL_ID)
         dataset = load_dataset(DATASET_NAME, split=DATASET_SPLIT)
         evaluator = Evaluator(dataset, tokenizer, "cuda" if torch.cuda.is_available() else "cpu")
-
+        render_device_info(evaluator.device)
     render_card(
         "Evaluator Initialized",
         f"LAMBADA test dataset prepared with [text.highlight]{len(dataset)}[/text.highlight] validation records.",

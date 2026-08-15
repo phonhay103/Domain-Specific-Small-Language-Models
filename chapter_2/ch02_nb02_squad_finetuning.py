@@ -156,7 +156,8 @@ def create_training_arguments(output_dir: str) -> TrainingArguments:
     return TrainingArguments(
         output_dir=output_dir,
         eval_strategy="epoch",
-        logging_strategy="epoch",
+        logging_strategy="steps",
+        logging_steps=1,
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
@@ -164,7 +165,7 @@ def create_training_arguments(output_dir: str) -> TrainingArguments:
         fp16=torch.cuda.is_available(),
         weight_decay=0.01,
         push_to_hub=False,
-        disable_tqdm=True,
+        disable_tqdm=False,
         report_to="none",
         save_strategy="no",
     )
@@ -315,12 +316,8 @@ def main() -> None:
         processing_class=tokenizer,
         data_collator=DefaultDataCollator(),
     )
-    silence_trainer(trainer)
-
-    # Step 4: Training Execution
-    render_step(4, "Executing DistilBERT Fine-Tuning", icon="🏋️")
-    with status_spinner("Running 10-epoch fine-tuning & evaluation loop..."):
-        train_output = trainer.train()
+    console.print("[bold green]Running 10-epoch fine-tuning & evaluation loop...[/bold green]")
+    train_output = trainer.train()
 
     render_training_metrics_table(trainer.state.log_history, title="DistilBERT Fine-Tuning Progression")
     render_card(

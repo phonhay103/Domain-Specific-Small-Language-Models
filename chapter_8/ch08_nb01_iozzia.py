@@ -35,6 +35,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -62,7 +63,7 @@ GENERATION_TOP_K = 950
 GENERATION_REPETITION_PENALTY = 1.2
 GENERATION_NUM_SEQUENCES = 10
 GENERATION_EOS_TOKEN_ID = 0
-EVAL_DEVICE = "cpu"
+EVAL_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +149,8 @@ def main() -> None:
     # Step 1: Loading Pipeline & Generating Sequences
     render_step(1, "Loading ProtGPT2 Pipeline & Generating Sequences", icon="📋")
     with status_spinner(f"Loading '{MODEL_ID}' text-generation pipeline..."):
-        protgpt2 = pipeline("text-generation", model=MODEL_ID)
+        protgpt2 = pipeline("text-generation", model=MODEL_ID, device=0 if torch.cuda.is_available() else -1)
+    render_device_info(EVAL_DEVICE, model=protgpt2.model)
 
     with status_spinner(f"Sampling {GENERATION_NUM_SEQUENCES} de novo protein sequences..."):
         raw_outputs = protgpt2(

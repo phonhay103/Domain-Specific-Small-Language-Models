@@ -201,52 +201,34 @@ def status_spinner(message: str) -> Generator[None, None, None]:
 
 
 def silence_hf_logs() -> None:
-    """Silence noisy third-party logging, telemetry, and unstyled progress bars."""
-    import logging
+    """Configure logging and enable progress bars for third-party tools during training/finetuning."""
     import os
     import warnings
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
     os.environ["DS_BUILD_OPS"] = "0"
+    os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
     warnings.filterwarnings("ignore")
-
-    for logger_name in ("transformers", "datasets", "urllib3", "torch", "accelerate", "deepspeed"):
-        logging.getLogger(logger_name).setLevel(logging.ERROR)
-
-    try:
-        import deepspeed.utils.logging as ds_logging
-
-        ds_logging.logger.setLevel(logging.ERROR)
-    except (ImportError, AttributeError):
-        pass
 
     try:
         import datasets
 
-        datasets.disable_progress_bar()
+        datasets.enable_progress_bar()
     except (ImportError, AttributeError):
         pass
 
     try:
         import transformers
 
-        transformers.logging.set_verbosity_error()
-        transformers.logging.disable_progress_bar()
+        transformers.logging.set_verbosity_info()
+        transformers.logging.enable_progress_bar()
     except (ImportError, AttributeError):
         pass
 
 
 def silence_trainer(trainer: Any) -> None:
-    """Remove raw stdout PrinterCallback / ProgressCallback from Hugging Face Trainer."""
-    try:
-        from transformers.trainer_callback import PrinterCallback, ProgressCallback
-
-        trainer.remove_callback(PrinterCallback)
-        trainer.remove_callback(ProgressCallback)
-    except (ImportError, AttributeError, ValueError):
-        pass
+    """No-op: keep PrinterCallback & ProgressCallback attached for training visibility."""
+    pass
 
 
 def render_training_metrics_table(
@@ -296,27 +278,44 @@ def render_training_metrics_table(
 
 def render_device_info(device: Any, model: Any = None) -> None:
     """Render a table displaying hardware device information."""
+    import torch
+
+    effective_device = device
+    if model is not None and hasattr(model, "device"):
+        effective_device = model.device
+
+    dev_str = str(effective_device).lower()
+    if "cuda" not in dev_str and torch.cuda.is_available():
+        effective_device = torch.device("cuda")
+        dev_str = "cuda"
+
     columns = [("Property", STYLE_PRIMARY, "left"), ("Value", STYLE_TEXT, "left")]
     rows = [
-        ("Compute Device", str(device).upper()),
+        ("Compute Device", str(effective_device).upper()),
     ]
-    
-    # Try to extract GPU name if possible
-    if "cuda" in str(device).lower():
+
+    if "cuda" in dev_str:
         try:
-            import torch
-            idx = 0 if str(device).lower() == "cuda" else int(str(device).split(":")[1])
+            idx = 0
+            if ":" in dev_str:
+                try:
+                    idx = int(dev_str.split(":")[1])
+                except ValueError:
+                    idx = 0
+            elif hasattr(effective_device, "index") and effective_device.index is not None:
+                idx = effective_device.index
+
             rows.append(("GPU Name", torch.cuda.get_device_name(idx)))
-            rows.append(("CUDA Version", torch.version.cuda))
+            rows.append(("CUDA Version", str(torch.version.cuda)))
         except Exception:
             pass
-            
+
     if model is not None:
         if hasattr(model, "device"):
             rows.append(("Model Placement", str(model.device)))
         if hasattr(model, "dtype"):
             rows.append(("Model Dtype", str(model.dtype)))
-            
+
     console.print(create_table("Hardware Device Information", columns, rows))
     pause()
 

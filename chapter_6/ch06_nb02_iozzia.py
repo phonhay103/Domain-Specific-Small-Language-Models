@@ -24,7 +24,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Common functional & UI utilities
-from common.functional import format_percentage
+from common.functional import format_percentage, get_model_memory_bytes
 from common.ui import (
     STYLE_INDEX,
     STYLE_NUMBER,
@@ -37,8 +37,8 @@ from common.ui import (
     create_table,
     pause,
     render_banner,
-    render_device_info,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -155,19 +155,27 @@ def main() -> None:
         icon="🚀",
     )
 
-    render_device_info(device)
-
-    # Step 1: Loading FP32 and LLM.int8() Models
-    render_step(1, "Loading Full Precision and 8-Bit Decomposed Models", icon="📋")
-    with status_spinner("Loading baseline FP32 model..."):
-        model_fp32 = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto")
+    # Step 1: Loading Models & Memory Footprint Comparison
+    render_step(1, "Loading Models & VRAM Footprint Comparison", icon="📋")
+    with status_spinner(f"Loading FP32 baseline and INT8 quantized models '{MODEL_ID}'..."):
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    fp32_bytes = model_fp32.get_memory_footprint()
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    with status_spinner("Loading LLM.int8() model via bitsandbytes..."):
-        model_int8 = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", load_in_8bit=True)
-    int8_bytes = model_int8.get_memory_footprint()
+        model_fp32 = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.float32).to(device)
+        model_fp32.eval()
 
+        model_int8 = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            load_in_8bit=True,
+            device_map="auto",
+        )
+        model_int8.eval()
+
+    fp32_bytes = get_model_memory_bytes(model_fp32)
+    int8_bytes = get_model_memory_bytes(model_int8)
+
+    render_device_info(device, model=model_fp32)
     mem_stats = compute_memory_reduction(fp32_bytes, int8_bytes)
     render_memory_table(mem_stats)
 

@@ -17,7 +17,7 @@ from typing import Any
 # Ensure root workspace is on pythonpath
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Third-party
+import torch
 from transformers import AutoTokenizer
 
 # Common functional & UI utilities
@@ -34,6 +34,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -138,6 +139,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, padding_side=TOKENIZER_PADDING_SIDE)
     tokenizer.add_bos_token = False
     stop_token_id: int = tokenizer("\n").input_ids[0]
+    render_device_info("cuda" if torch.cuda.is_available() else "cpu")
     render_policy_table(DEFAULT_POLICY_SPEC)
 
     # Step 2: FlexGen Engine Loading

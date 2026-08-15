@@ -47,6 +47,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -189,7 +190,11 @@ def main() -> None:
     # Step 2: Dense Embedding & LanceDB Indexing
     render_step(2, "Generating Dense Vector Embeddings & LanceDB Indexing", icon="🧠")
     with status_spinner(f"Loading '{EMBEDDING_MODEL_NAME}'..."):
-        embedding_model = SentenceTransformer(model_name_or_path=EMBEDDING_MODEL_NAME, device="cpu")
+        embedding_model = SentenceTransformer(
+            model_name_or_path=EMBEDDING_MODEL_NAME,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+    render_device_info(embedding_model.device, model=embedding_model)
 
     with status_spinner("Encoding text chunks into 768-dimensional dense vectors..."):
         texts = [c.text for c in raw_chunks]

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Third-party
 import faiss
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 
 # Common functional & UI utilities
@@ -169,7 +170,8 @@ def main() -> None:
     # Step 2: Encode and Build Index
     render_step(2, "Generating Dense Embeddings & Building Index", icon="🧠")
     with status_spinner(f"Loading SentenceTransformer '{MODEL_ID}'..."):
-        model = SentenceTransformer(MODEL_ID)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = SentenceTransformer(MODEL_ID, device=device)
     render_device_info(model.device, model=model)
 
     corpus_texts = extract_texts(CORPUS)

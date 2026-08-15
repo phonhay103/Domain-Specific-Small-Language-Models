@@ -38,6 +38,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -68,7 +69,7 @@ class QuantizationEvaluation:
 
 
 MODEL_ID = "openai-community/gpt2"
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 GENERATION_PROMPT = "My favourite school subject is"
 MAX_GEN_LENGTH = 100
 TOP_K = 30
@@ -183,6 +184,7 @@ def main() -> None:
         model = AutoModelForCausalLM.from_pretrained(MODEL_ID).to(DEVICE)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
+    render_device_info(model.device, model=model)
     fp_memory = model.get_memory_footprint()
     render_card(
         title="Model Footprint",

@@ -60,6 +60,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -480,6 +481,9 @@ def main() -> None:
     )
 
     # Step 1: Ingestion & Text Chunking
+    import torch
+
+    render_device_info("cuda" if torch.cuda.is_available() else "cpu")
     render_step(1, "PDF Ingestion & Section Partitioning", icon="📋")
     pages_to_remove = [x - 1 for x in PAGES_TO_REMOVE_RAW]
     remove_pdf_pages(PRIMARY_PDF_INPUT, PRIMARY_PDF_OUTPUT, pages_to_remove)

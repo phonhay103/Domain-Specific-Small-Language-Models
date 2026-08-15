@@ -42,6 +42,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -195,6 +196,7 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         model.save_pretrained(ONNX_PATH)
         tokenizer.save_pretrained(ONNX_PATH)
+    render_device_info(model.device, model=model)
 
     vanilla_clf = pipeline("text-classification", model=model, tokenizer=tokenizer)
     test_query = "Could you assist me in checking my card validity?"

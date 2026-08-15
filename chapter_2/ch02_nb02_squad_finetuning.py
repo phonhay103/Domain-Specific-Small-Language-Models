@@ -77,7 +77,7 @@ MAX_LENGTH = 384
 STRIDE = 128
 TRAIN_SAMPLES = 100
 EVAL_SAMPLES = 50
-OUTPUT_DIR = "my_squad_model"
+OUTPUT_DIR = "experiments"
 SAMPLE_QUESTION = "How many members does the band have?"
 SAMPLE_CONTEXT = "The band consists of 4 members: John, Paul, George, and Ringo."
 
@@ -248,7 +248,29 @@ def render_sample_table(sample: QASample) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     """Execute SQuAD extractive question-answering training workflow."""
+    import glob
+
     silence_hf_logs()
+
+    # Parse CLI arguments for checkpoint loading
+    checkpoint_path = None
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith("--checkpoint="):
+            checkpoint_path = arg.split("=", 1)[1]
+        elif arg == "--checkpoint":
+            if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
+                checkpoint_path = sys.argv[i + 1]
+            else:
+                checkpoints = sorted(glob.glob(f"{OUTPUT_DIR}/squad_model_checkpoint"))
+                if checkpoints:
+                    checkpoint_path = checkpoints[-1]
+                else:
+                    checkpoints = sorted(glob.glob(f"{OUTPUT_DIR}/squad_*"))
+                    if checkpoints:
+                        checkpoint_path = checkpoints[-1]
+                    else:
+                        console.print(f"[bold red]Error: No checkpoints found in {OUTPUT_DIR}[/bold red]")
+                        sys.exit(1)
 
     render_banner(
         title="Fine-Tuning DistilBERT on SQuAD with Span Mapping",
@@ -257,6 +279,7 @@ def main() -> None:
             "Base Model": MODEL_ID,
             "Train Subset": f"{TRAIN_SAMPLES} samples",
             "Eval Subset": f"{EVAL_SAMPLES} samples",
+            "Mode": f"Evaluation ({checkpoint_path})" if checkpoint_path else "Full Training Pipeline",
         },
         icon="🚀",
     )
@@ -266,7 +289,7 @@ def main() -> None:
     with status_spinner("Loading SQuAD dataset partition from Hugging Face..."):
         squad_train = load_dataset(DATASET_ID, split=f"train[:{TRAIN_SAMPLES}]")
         squad_eval = load_dataset(DATASET_ID, split=f"validation[:{EVAL_SAMPLES}]")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path if checkpoint_path else MODEL_ID)
 
     first_item = squad_train[0]
     sample_record = QASample(
@@ -277,59 +300,75 @@ def main() -> None:
     )
     render_sample_table(sample_record)
 
-    # Step 2: Preprocessing & Span Alignment
-    render_step(2, "Preprocessing & Mapping Subword Token Spans", icon="⚙️")
-    with status_spinner("Mapping character offsets to subword token boundaries..."):
-        train_dataset = squad_train.map(
-            lambda ex: preprocess_training_examples(ex, tokenizer),
-            batched=True,
-            remove_columns=squad_train.column_names,
+    if checkpoint_path:
+        # Step 3: Loading Saved Fine-Tuned Model
+        render_step(3, "Loading Saved Fine-Tuned Model", icon="🧠")
+        with status_spinner(f"Loading fine-tuned model from '{checkpoint_path}'..."):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = AutoModelForQuestionAnswering.from_pretrained(checkpoint_path).to(device)
+        render_device_info(next(model.parameters()).device, model=model)
+    else:
+        # Step 2: Preprocessing & Span Alignment
+        render_step(2, "Preprocessing & Mapping Subword Token Spans", icon="⚙️")
+        with status_spinner("Mapping character offsets to subword token boundaries..."):
+            train_dataset = squad_train.map(
+                lambda ex: preprocess_training_examples(ex, tokenizer),
+                batched=True,
+                remove_columns=squad_train.column_names,
+            )
+            eval_dataset = squad_eval.map(
+                lambda ex: preprocess_training_examples(ex, tokenizer),
+                batched=True,
+                remove_columns=squad_eval.column_names,
+            )
+
+        render_card(
+            title="Span Alignment Statistics",
+            content=(
+                f"[text.muted]Generated Training Chunks:[/text.muted] [text.highlight]{len(train_dataset)}[/text.highlight]\n"
+                f"[text.muted]Generated Validation Chunks:[/text.muted] [text.highlight]{len(eval_dataset)}[/text.highlight]\n"
+                f"[text.muted]Window Stride:[/text.muted] [brand.secondary]{STRIDE} tokens[/brand.secondary]"
+            ),
+            icon="✔",
         )
-        eval_dataset = squad_eval.map(
-            lambda ex: preprocess_training_examples(ex, tokenizer),
-            batched=True,
-            remove_columns=squad_eval.column_names,
+
+        # Step 3: Model & Trainer Setup
+        render_step(3, "Initializing Model & Training Configuration", icon="🧠")
+        with status_spinner(f"Loading QA head for '{MODEL_ID}'..."):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = AutoModelForQuestionAnswering.from_pretrained(MODEL_ID).to(device)
+        render_device_info(next(model.parameters()).device, model=model)
+
+        training_args = create_training_arguments(OUTPUT_DIR)
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+            data_collator=DefaultDataCollator(),
         )
+        console.print("[bold green]Running 10-epoch fine-tuning & evaluation loop...[/bold green]")
+        train_output = trainer.train()
 
-    render_card(
-        title="Span Alignment Statistics",
-        content=(
-            f"[text.muted]Generated Training Chunks:[/text.muted] [text.highlight]{len(train_dataset)}[/text.highlight]\n"
-            f"[text.muted]Generated Validation Chunks:[/text.muted] [text.highlight]{len(eval_dataset)}[/text.highlight]\n"
-            f"[text.muted]Window Stride:[/text.muted] [brand.secondary]{STRIDE} tokens[/brand.secondary]"
-        ),
-        icon="✔",
-    )
+        render_training_metrics_table(trainer.state.log_history, title="DistilBERT Fine-Tuning Progression")
 
-    # Step 3: Model & Trainer Setup
-    render_step(3, "Initializing Model & Training Configuration", icon="🧠")
-    with status_spinner(f"Loading QA head for '{MODEL_ID}'..."):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = AutoModelForQuestionAnswering.from_pretrained(MODEL_ID).to(device)
-    render_device_info(next(model.parameters()).device, model=model)
-    training_args = create_training_arguments(OUTPUT_DIR)
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        processing_class=tokenizer,
-        data_collator=DefaultDataCollator(),
-    )
-    console.print("[bold green]Running 10-epoch fine-tuning & evaluation loop...[/bold green]")
-    train_output = trainer.train()
+        # Save model and tokenizer
+        save_dir = f"{OUTPUT_DIR}/squad_model_checkpoint"
+        model.save_pretrained(save_dir)
+        tokenizer.save_pretrained(save_dir)
 
-    render_training_metrics_table(trainer.state.log_history, title="DistilBERT Fine-Tuning Progression")
-    render_card(
-        "Training Status",
-        (
-            f"[status.success]DistilBERT fine-tuning completed successfully.[/status.success]\n"
-            f"[text.muted]Total Runtime:[/text.muted] [brand.secondary]{train_output.metrics.get('train_runtime', 0):.2f}s[/brand.secondary]  •  "
-            f"[text.muted]Throughput:[/text.muted] [text.highlight]{train_output.metrics.get('train_samples_per_second', 0):.1f} samples/s[/text.highlight]  •  "
-            f"[text.muted]Final Train Loss:[/text.muted] [status.warning]{train_output.metrics.get('train_loss', 0):.4f}[/status.warning]"
-        ),
-        icon="✔",
-    )
+        render_card(
+            "Training Status & Checkpoint Saved",
+            (
+                f"[status.success]DistilBERT fine-tuning completed successfully.[/status.success]\n"
+                f"[text.muted]Total Runtime:[/text.muted] [brand.secondary]{train_output.metrics.get('train_runtime', 0):.2f}s[/brand.secondary]  •  "
+                f"[text.muted]Throughput:[/text.muted] [text.highlight]{train_output.metrics.get('train_samples_per_second', 0):.1f} samples/s[/text.highlight]  •  "
+                f"[text.muted]Final Train Loss:[/text.muted] [status.warning]{train_output.metrics.get('train_loss', 0):.4f}[/status.warning]\n"
+                f"[text.muted]Checkpoint Saved To:[/text.muted] [text.highlight]{save_dir}[/text.highlight]"
+            ),
+            icon="💾",
+        )
 
     # Step 5: Extractive QA Pipeline Inference
     render_step(5, "Evaluating Extractive QA Pipeline", icon="🎯")

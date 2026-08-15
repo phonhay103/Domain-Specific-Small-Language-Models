@@ -276,6 +276,7 @@ def render_training_metrics_table(
     console.print(create_table(title, columns, rows))
     pause()
 
+
 def render_device_info(device: Any, model: Any = None) -> None:
     """Render a table displaying hardware device information."""
     import torch
@@ -318,4 +319,3 @@ def render_device_info(device: Any, model: Any = None) -> None:
 
     console.print(create_table("Hardware Device Information", columns, rows))
     pause()
-

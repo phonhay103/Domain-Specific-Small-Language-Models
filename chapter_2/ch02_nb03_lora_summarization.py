@@ -8,6 +8,7 @@ on the SAMSum dataset for dialogue summarization, evaluated with ROUGE metrics.
 Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -86,8 +87,8 @@ LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
 OUTPUT_DIR = "experiments"
-EPOCHS = 5
-BATCH_SIZE = 8
+EPOCHS = 1
+BATCH_SIZE = 32
 LEARNING_RATE = 1e-3
 
 
@@ -101,11 +102,13 @@ def compute_length_percentiles(
 ) -> tuple[LengthPercentiles, ...]:
     """Pure analysis: calculate token length distributions across train/test splits."""
     combined = concatenate_datasets([dataset["train"], dataset["test"]])
+    num_cores = os.cpu_count() or 1
 
     tokenized_inputs = combined.map(
         lambda x: tokenizer(x["dialogue"], truncation=True),
         batched=True,
         remove_columns=["dialogue", "summary"],
+        num_proc=num_cores,
     )
     input_lengths = [len(x) for x in tokenized_inputs["input_ids"]]
 
@@ -113,6 +116,7 @@ def compute_length_percentiles(
         lambda x: tokenizer(x["summary"], truncation=True),
         batched=True,
         remove_columns=["dialogue", "summary"],
+        num_proc=num_cores,
     )
     target_lengths = [len(x) for x in tokenized_targets["input_ids"]]
 
@@ -165,18 +169,24 @@ def create_lora_config() -> LoraConfig:
 
 
 def create_training_args(output_dir: str) -> Seq2SeqTrainingArguments:
-    """Pure factory for seq2seq training arguments."""
+    """Pure factory for seq2seq training arguments optimized for RTX 5060 Ti 16GB."""
+    has_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     return Seq2SeqTrainingArguments(
         output_dir=output_dir,
-        auto_find_batch_size=True,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
         num_train_epochs=EPOCHS,
         logging_strategy="steps",
-        logging_steps=1,
-        fp16=torch.cuda.is_available(),
+        logging_steps=10,
+        fp16=torch.cuda.is_available() and not has_bf16,
+        bf16=has_bf16,
+        optim="adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
+        dataloader_num_workers=4 if torch.cuda.is_available() else 0,
+        dataloader_pin_memory=torch.cuda.is_available(),
         save_strategy="no",
         disable_tqdm=False,
-        report_to="none",
+        remove_unused_columns=False,
     )
 
 
@@ -229,6 +239,24 @@ def main() -> None:
     """Execute functional dialogue summarization with FLAN-T5 and LoRA."""
     silence_hf_logs()
 
+    # Parse CLI arguments for checkpoint loading
+    import glob
+
+    checkpoint_path = None
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith("--checkpoint="):
+            checkpoint_path = arg.split("=", 1)[1]
+        elif arg == "--checkpoint":
+            if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
+                checkpoint_path = sys.argv[i + 1]
+            else:
+                checkpoints = sorted(glob.glob(f"{OUTPUT_DIR}/peft_model_*"))
+                if checkpoints:
+                    checkpoint_path = checkpoints[-1]
+                else:
+                    console.print(f"[bold red]Error: No checkpoints found in {OUTPUT_DIR}[/bold red]")
+                    sys.exit(1)
+
     render_banner(
         title="Dialogue Summarization with FLAN-T5 & PEFT LoRA",
         subtitle="Chapter 2: Domain-Specific Small Language Models",
@@ -237,6 +265,7 @@ def main() -> None:
             "Dataset": DATASET_ID,
             "LoRA Rank": str(LORA_R),
             "LoRA Alpha": str(LORA_ALPHA),
+            "Mode": f"Evaluation ({checkpoint_path})" if checkpoint_path else "Full Training Pipeline",
         },
         icon="🚀",
     )
@@ -245,7 +274,7 @@ def main() -> None:
     render_step(1, "Loading SAMSum Dataset & Tokenizer", icon="📋")
     with status_spinner(f"Loading '{DATASET_ID}' dataset..."):
         dataset = load_dataset(DATASET_ID)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path if checkpoint_path else MODEL_ID)
 
     render_dataset_stats(dataset)
 
@@ -253,66 +282,94 @@ def main() -> None:
         percentile_stats = compute_length_percentiles(dataset, tokenizer)
     render_percentiles_table(percentile_stats)
 
-    # Step 2: Tokenizing & Data Collation
-    render_step(2, "Preprocessing & Collating Seq2Seq Batches", icon="⚙️")
-    with status_spinner("Encoding dialogues and target summaries..."):
-        tokenized_dataset = dataset.map(
-            lambda s: preprocess_batch(s, tokenizer),
-            batched=True,
-            remove_columns=["dialogue", "summary", "id"],
+    if checkpoint_path:
+        # Step 3: Loading Saved PEFT LoRA Model
+        render_step(3, "Loading Saved PEFT LoRA Model", icon="🧠")
+        with status_spinner(f"Loading LoRA adapters from '{checkpoint_path}'..."):
+            peft_model = AutoPeftModelForSeq2SeqLM.from_pretrained(
+                checkpoint_path,
+                device_map="auto" if torch.cuda.is_available() else None,
+            )
+            if torch.cuda.is_available() and hasattr(torch, "compile"):
+                peft_model = torch.compile(peft_model)
+        render_device_info(peft_model.device, model=peft_model)
+
+        trainable_p, total_p = peft_model.get_nb_trainable_parameters()
+        stats = LoRAParamStats(
+            trainable_params=trainable_p,
+            total_params=total_p,
+            trainable_ratio=format_percentage(trainable_p, total_p),
         )
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer,
-        label_pad_token_id=-100,
-        pad_to_multiple_of=8,
-    )
-
-    # Step 3: Initializing PEFT LoRA Model
-    render_step(3, "Configuring LoRA Low-Rank Decomposition Adapters", icon="🧠")
-    with status_spinner(f"Injecting LoRA adapters into '{MODEL_ID}' attention layers..."):
-        base_model = AutoModelForSeq2SeqLM.from_pretrained(
-            MODEL_ID, device_map="auto" if torch.cuda.is_available() else None
+        render_param_stats_table(stats)
+    else:
+        # Step 2: Tokenizing & Data Collation
+        render_step(2, "Preprocessing & Collating Seq2Seq Batches", icon="⚙️")
+        with status_spinner("Encoding dialogues and target summaries..."):
+            tokenized_dataset = dataset.map(
+                lambda s: preprocess_batch(s, tokenizer),
+                batched=True,
+                remove_columns=["dialogue", "summary", "id"],
+                num_proc=os.cpu_count() or 1,
+            )
+        data_collator = DataCollatorForSeq2Seq(
+            tokenizer,
+            label_pad_token_id=-100,
+            pad_to_multiple_of=8,
         )
-        lora_config = create_lora_config()
-        peft_model = get_peft_model(base_model, lora_config)
-    render_device_info(peft_model.device, model=peft_model)
 
-    trainable_p, total_p = peft_model.get_nb_trainable_parameters()
-    stats = LoRAParamStats(
-        trainable_params=trainable_p,
-        total_params=total_p,
-        trainable_ratio=format_percentage(trainable_p, total_p),
-    )
-    render_param_stats_table(stats)
+        # Step 3: Initializing PEFT LoRA Model
+        render_step(3, "Configuring LoRA Low-Rank Decomposition Adapters", icon="🧠")
+        with status_spinner(f"Injecting LoRA adapters into '{MODEL_ID}' attention layers..."):
+            base_model = AutoModelForSeq2SeqLM.from_pretrained(
+                MODEL_ID,
+                device_map="auto" if torch.cuda.is_available() else None,
+                attn_implementation="sdpa" if torch.cuda.is_available() else None,
+            )
+            lora_config = create_lora_config()
+            peft_model = get_peft_model(base_model, lora_config)
+            if torch.cuda.is_available() and hasattr(torch, "compile"):
+                peft_model = torch.compile(peft_model)
+        render_device_info(peft_model.device, model=peft_model)
 
-    # Step 4: Training with Seq2SeqTrainer
-    render_step(4, "Executing PEFT LoRA Training Loop", icon="🏋️")
-    training_args = create_training_args(OUTPUT_DIR)
-    trainer = Seq2SeqTrainer(
-        model=peft_model,
-        args=training_args,
-        data_collator=data_collator,
-        train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["validation"],
-    )
-    console.print(f"[bold green]Training LoRA adapter weights for {EPOCHS} epoch(s)...[/bold green]")
-    train_output = trainer.train()
+        trainable_p, total_p = peft_model.get_nb_trainable_parameters()
+        stats = LoRAParamStats(
+            trainable_params=trainable_p,
+            total_params=total_p,
+            trainable_ratio=format_percentage(trainable_p, total_p),
+        )
+        render_param_stats_table(stats)
 
-    render_training_metrics_table(trainer.state.log_history, title="PEFT LoRA Training Progression")
+        # Step 4: Training with Seq2SeqTrainer
+        render_step(4, "Executing PEFT LoRA Training Loop", icon="🏋️")
+        training_args = create_training_args(OUTPUT_DIR)
+        trainer = Seq2SeqTrainer(
+            model=peft_model,
+            args=training_args,
+            data_collator=data_collator,
+            train_dataset=tokenized_dataset["train"],
+            eval_dataset=tokenized_dataset["validation"],
+        )
+        console.print(f"[bold green]Training LoRA adapter weights for {EPOCHS} epoch(s)...[/bold green]")
+        train_output = trainer.train()
 
-    save_dir = f"{OUTPUT_DIR}/peft_model_{int(current_time())}"
-    peft_model.save_pretrained(save_dir)
-    tokenizer.save_pretrained(save_dir)
-    render_card(
-        "Training Status & Checkpoint Saved",
-        (
-            f"[status.success]PEFT LoRA fine-tuning completed successfully.[/status.success]\n"
-            f"[text.muted]Total Runtime:[/text.muted] [brand.secondary]{train_output.metrics.get('train_runtime', 0):.2f}s[/brand.secondary]  •  "
-            f"[text.muted]Final Train Loss:[/text.muted] [status.warning]{train_output.metrics.get('train_loss', 0):.4f}[/status.warning]\n"
-            f"[text.muted]Checkpoint Saved To:[/text.muted] [text.highlight]{save_dir}[/text.highlight]"
-        ),
-        icon="💾",
-    )
+        render_training_metrics_table(trainer.state.log_history, title="PEFT LoRA Training Progression")
+
+        save_dir = f"{OUTPUT_DIR}/peft_model_{int(current_time())}"
+
+        # Unwrap torch.compile wrapper if exists
+        uncompiled_model = peft_model._orig_mod if hasattr(peft_model, "_orig_mod") else peft_model
+        uncompiled_model.save_pretrained(save_dir)
+        tokenizer.save_pretrained(save_dir)
+        render_card(
+            "Training Status & Checkpoint Saved",
+            (
+                f"[status.success]PEFT LoRA fine-tuning completed successfully.[/status.success]\n"
+                f"[text.muted]Total Runtime:[/text.muted] [brand.secondary]{train_output.metrics.get('train_runtime', 0):.2f}s[/brand.secondary]  •  "
+                f"[text.muted]Final Train Loss:[/text.muted] [status.warning]{train_output.metrics.get('train_loss', 0):.4f}[/status.warning]\n"
+                f"[text.muted]Checkpoint Saved To:[/text.muted] [text.highlight]{save_dir}[/text.highlight]"
+            ),
+            icon="💾",
+        )
 
     # Step 5: Sample Inference Preview
     render_step(5, "Generating Sample Summarization", icon="💬")

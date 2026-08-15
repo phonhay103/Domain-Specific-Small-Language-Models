@@ -80,9 +80,7 @@ OPTIMIZED_FP16_MODEL_PATH = "optimized_fp16.onnx"
 BENCHMARK_PROMPT = "Today is Saturday and"
 MAX_SEQUENCE_LENGTH = 1024
 ORT_PROVIDERS = (
-    ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    if torch.cuda.is_available()
-    else ["CPUExecutionProvider"]
+    ["CUDAExecutionProvider", "CPUExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
 )
 BENCHMARK_SEQUENCE_LENGTHS = (1, 4, 64, 256, 512, 1024)
 BENCHMARK_WARMUP_RUNS = 10

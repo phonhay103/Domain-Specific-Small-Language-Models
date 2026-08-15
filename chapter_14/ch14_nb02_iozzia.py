@@ -306,7 +306,10 @@ def main() -> None:
     # Step 4: Executing Agentic RAG Workflow
     render_step(4, "Executing SmolAgents Autonomous ReAct Routing", icon="🤖")
     agent = build_agent(hybrid_search_tool, MODEL_ID)
-    render_device_info("cuda" if torch.cuda.is_available() else "cpu", model=agent.model.model if hasattr(agent.model, "model") else None)
+    render_device_info(
+        "cuda" if torch.cuda.is_available() else "cpu",
+        model=agent.model.model if hasattr(agent.model, "model") else None,
+    )
     agent_output = agent.run(AGENT_QUERY)
 
     render_card("Final Agentic RAG Output", str(agent_output), icon="🎯")

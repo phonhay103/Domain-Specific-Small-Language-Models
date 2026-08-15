@@ -35,6 +35,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -163,6 +164,7 @@ def main() -> None:
     tokenized = tokenizer.encode(TARGET_SEQUENCE)
     input_tensor = torch.tensor([tokenized.ids]).to(device)
     model = model.to(device)
+    render_device_info(device, model=model)
     pad_id = tokenizer.encode("<|pad|>").ids[0]
 
     with status_spinner(f"Sampling {NUMBER_OF_SEQUENCES} antibody sequences conditioned on antigen..."):

@@ -112,6 +112,7 @@ def render_step(step_number: int, title: str, icon: str = "◆") -> None:
     console.rule(
         f"[dim]{icon}[/dim] [primary]Step {step_number}:[/primary] [text]{title}[/text]",
         style=COLOR_BORDER,
+        align="left",
     )
     pause()
 
@@ -289,5 +290,31 @@ def render_training_metrics_table(
         )
 
     console.print(create_table(title, columns, rows))
+    pause()
+
+def render_device_info(device: Any, model: Any = None) -> None:
+    """Render a table displaying hardware device information."""
+    columns = [("Property", STYLE_PRIMARY, "left"), ("Value", STYLE_TEXT, "left")]
+    rows = [
+        ("Compute Device", str(device).upper()),
+    ]
+    
+    # Try to extract GPU name if possible
+    if "cuda" in str(device).lower():
+        try:
+            import torch
+            idx = 0 if str(device).lower() == "cuda" else int(str(device).split(":")[1])
+            rows.append(("GPU Name", torch.cuda.get_device_name(idx)))
+            rows.append(("CUDA Version", torch.version.cuda))
+        except Exception:
+            pass
+            
+    if model is not None:
+        if hasattr(model, "device"):
+            rows.append(("Model Placement", str(model.device)))
+        if hasattr(model, "dtype"):
+            rows.append(("Model Dtype", str(model.dtype)))
+            
+    console.print(create_table("Hardware Device Information", columns, rows))
     pause()
 

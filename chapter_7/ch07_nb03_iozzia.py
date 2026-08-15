@@ -44,6 +44,7 @@ from common.ui import (
     create_table,
     pause,
     render_banner,
+    render_device_info,
     render_card,
     render_code_block,
     render_step,
@@ -175,6 +176,7 @@ def main() -> None:
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    render_device_info(device)
     profiles: list[StarCoderLatencyProfile] = []
 
     # Phase 1: Vanilla StarCoder2-3B (bfloat16)

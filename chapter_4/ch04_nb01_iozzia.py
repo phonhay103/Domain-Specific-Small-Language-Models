@@ -37,6 +37,7 @@ from common.ui import (
     render_banner,
     render_card,
     render_code_block,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -164,16 +165,6 @@ def measure_kv_cache_benchmark(
 # ---------------------------------------------------------------------------
 # View / Rendering Functions
 # ---------------------------------------------------------------------------
-def render_device_table(model: AutoModelForCausalLM, tokenizer: AutoTokenizer) -> None:
-    """Render device and tensor precision status."""
-    columns = [("Property", STYLE_PRIMARY, "left"), ("Value", STYLE_TEXT, "left")]
-    rows = [
-        ("Primary Hardware Device", str(model.device)),
-        ("Torch Floating Point Dtype", str(model.dtype)),
-        ("Tokenizer Padding Side", str(tokenizer.padding_side)),
-    ]
-    console.print(create_table("Model Runtime Placement", columns, rows))
-    pause()
 
 
 def render_batch_results_table(prompts: Sequence[str], completions: Sequence[str]) -> None:
@@ -236,7 +227,7 @@ def main() -> None:
         )
         model.eval()
 
-    render_device_table(model, tokenizer)
+    render_device_info(model.device, model=model)
 
     # Step 2: Single-Prompt Text Generation
     render_step(2, "Executing Greedy Continuation on Base Prompt", icon="💬")

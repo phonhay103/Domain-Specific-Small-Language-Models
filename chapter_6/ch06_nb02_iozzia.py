@@ -37,6 +37,7 @@ from common.ui import (
     create_table,
     pause,
     render_banner,
+    render_device_info,
     render_card,
     render_step,
     render_takeaways,
@@ -153,6 +154,8 @@ def main() -> None:
         },
         icon="🚀",
     )
+
+    render_device_info(device)
 
     # Step 1: Loading FP32 and LLM.int8() Models
     render_step(1, "Loading Full Precision and 8-Bit Decomposed Models", icon="📋")

@@ -38,6 +38,7 @@ from common.ui import (
     create_table,
     pause,
     render_banner,
+    render_device_info,
     render_card,
     render_step,
     render_takeaways,
@@ -194,11 +195,7 @@ def main() -> None:
             model = model.to("cuda")
         model.eval()
 
-    render_card(
-        "Device Status",
-        f"Model loaded on device [text.highlight]{model.device}[/text.highlight] in FP16 precision.",
-        icon="✔",
-    )
+    render_device_info(model.device, model=model)
 
     # Step 2: Base PyTorch Generation Sample
     render_step(2, "Generating Baseline Output with Standard PyTorch", icon="💬")

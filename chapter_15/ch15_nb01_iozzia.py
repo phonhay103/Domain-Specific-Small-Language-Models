@@ -58,6 +58,7 @@ from common.ui import (
     create_table,
     pause,
     render_banner,
+    render_device_info,
     render_card,
     render_step,
     render_takeaways,
@@ -506,6 +507,7 @@ def main() -> None:
     # Step 1: Decoding Strategies Comparison (Math Prompt)
     render_step(1, "Comparing Test-Time Search & Decoding Strategies", icon="📋")
     model, tokenizer = download_model_from_hf(MODEL_NAME)
+    render_device_info(model.device, model=model)
     render_card("Math Evaluation Prompt", MATH_PROMPT, icon="❓")
     messages = [{"role": "user", "content": MATH_PROMPT}]
     run_decoding_comparison(model, tokenizer, messages)

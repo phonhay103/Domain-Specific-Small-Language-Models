@@ -57,6 +57,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -699,6 +700,7 @@ def main() -> None:
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    render_device_info(device, model=model)
     render_step(1, "Loading Model and HumanEval Problem Set", icon="📋")
     model, tokenizer = load_model_and_tokenizer(MODEL_ID, device)
     problems = read_problems_local(PROBLEMS_FILE_PATH)

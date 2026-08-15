@@ -38,6 +38,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -113,6 +114,7 @@ def main() -> None:
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    render_device_info(device)
 
     # Step 1: GPT-2 Text Generation with vLLM
     render_step(1, "Continuous PagedAttention Serving for GPT-2", icon="📋")

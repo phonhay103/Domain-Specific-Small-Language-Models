@@ -42,6 +42,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     status_spinner,
@@ -151,7 +152,7 @@ def main() -> None:
             model = model.to("cuda")
         model.eval()
 
-    render_card("Model Status", f"Model loaded on device [text.highlight]{model.device}[/text.highlight]", icon="✔")
+    render_device_info(model.device, model=model)
 
     # Step 2: Exporting Base ONNX Graph
     render_step(2, "Tracing & Exporting Base ONNX Graph", icon="⚙️")

@@ -40,6 +40,7 @@ from common.ui import (
     pause,
     render_banner,
     render_card,
+    render_device_info,
     render_step,
     render_takeaways,
     render_training_metrics_table,
@@ -302,6 +303,7 @@ def main() -> None:
     render_step(3, "Initializing Model & Training Configuration", icon="🧠")
     with status_spinner(f"Loading QA head for '{MODEL_ID}'..."):
         model = AutoModelForQuestionAnswering.from_pretrained(MODEL_ID)
+    render_device_info(next(model.parameters()).device, model=model)
 
     training_args = create_training_arguments(OUTPUT_DIR)
     trainer = Trainer(

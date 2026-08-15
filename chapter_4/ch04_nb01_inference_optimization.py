@@ -248,9 +248,7 @@ def render_batch_results_table(prompts: Sequence[str], completions: Sequence[str
         ("Input Prompt", STYLE_PRIMARY, "left"),
         ("Generated Continuation", STYLE_TEXT, "left"),
     ]
-    rows = [
-        (i, prompt, comp.strip()) for i, (prompt, comp) in enumerate(zip(prompts, completions), start=1)
-    ]
+    rows = [(i, prompt, comp.strip()) for i, (prompt, comp) in enumerate(zip(prompts, completions), start=1)]
     console.print(create_table("Batched Generation Results (Left-Padded)", columns, rows))
     pause()
 

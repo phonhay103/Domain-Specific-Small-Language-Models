@@ -80,7 +80,6 @@ BENCHMARK_PROMPTS: tuple[str, ...] = (
 WARMUP_RUNS = 2
 BENCHMARK_RUNS = 10
 MAX_NEW_TOKENS = 64
-REPLACE_METHOD = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +92,50 @@ def compute_latency_profile(raw_latencies_ms: Sequence[float]) -> LatencyProfile
         std_ms=float(np.std(raw_latencies_ms)),
         p95_ms=float(np.percentile(raw_latencies_ms, 95)),
     )
+
+
+def adapt_deepspeed_transformer_layers(model: Any) -> Any:
+    """Adapt DeepSpeed kernel-injected transformer blocks for modern Hugging Face transformers.
+
+    Modern Hugging Face transformers pass `past_key_values` (e.g. `DynamicCache`) as positional
+    argument 1 to model blocks. DeepSpeed-Inference expects tensor positional arguments and manages
+    its KV cache internally. This wrapper ensures parameter compatibility and tensor return types.
+    """
+    if not hasattr(model, "transformer") or not hasattr(model.transformer, "h"):
+        return model
+
+    for block in model.transformer.h:
+        orig_forward = block.forward
+
+        def make_forward(fn: Any) -> Any:
+            def forward(
+                hidden_states: Any,
+                past_key_values: Any = None,
+                causal_mask: Any = None,
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
+                if isinstance(hidden_states, tuple):
+                    hidden_states = hidden_states[0]
+                layer_past = past_key_values if not hasattr(past_key_values, "key_cache") else None
+                kwargs_ds = dict(kwargs)
+                kwargs_ds["use_cache"] = False
+                out = fn(
+                    input=hidden_states,
+                    input_mask=causal_mask,
+                    attention_mask=causal_mask,
+                    layer_past=layer_past,
+                    **kwargs_ds,
+                )
+                if isinstance(out, tuple):
+                    return out[0]
+                return out
+
+            return forward
+
+        block.forward = make_forward(orig_forward)
+
+    return model
 
 
 def measure_engine_latency(
@@ -210,17 +253,21 @@ def main() -> None:
 
     render_card("Base PyTorch Output", base_text, icon="📄")
 
+    extended_prompts = list(BENCHMARK_PROMPTS) * (BENCHMARK_RUNS // len(BENCHMARK_PROMPTS) + 1)
+
+    with status_spinner(f"Benchmarking Base PyTorch across {BENCHMARK_RUNS} iterations..."):
+        base_profile = measure_engine_latency(model, tokenizer, extended_prompts)
+
     # Step 3: Initializing DeepSpeed-Inference
     render_step(3, "Initializing DeepSpeed-Inference with Fused CUDA Kernels", icon="⚙️")
     with status_spinner("Injecting fused attention and LayerNorm kernels..."):
         ds_engine = deepspeed.init_inference(
             model,
-            mp_size=1,
+            tensor_parallel={"tp_size": 1},
             dtype=torch.float16,
             replace_with_kernel_inject=True,
-            replace_method=REPLACE_METHOD,
         )
-        ds_model = ds_engine.module
+        ds_model = adapt_deepspeed_transformer_layers(ds_engine.module)
     render_card("Engine Status", "DeepSpeed-Inference engine successfully initialized with kernel injection.", icon="✔")
 
     # Step 4: DeepSpeed Generation Sample
@@ -234,14 +281,8 @@ def main() -> None:
 
     # Step 5: Comparative Latency Benchmarking
     render_step(5, "Benchmarking Latency, Variance, and P95 Scaling", icon="📊")
-    extended_prompts = list(BENCHMARK_PROMPTS) * (BENCHMARK_RUNS // len(BENCHMARK_PROMPTS) + 1)
-
-    with status_spinner(f"Benchmarking Base PyTorch across {BENCHMARK_RUNS} iterations..."):
-        base_profile = measure_engine_latency(model, tokenizer, extended_prompts)
-
     with status_spinner(f"Benchmarking DeepSpeed-Inference across {BENCHMARK_RUNS} iterations..."):
         ds_profile = measure_engine_latency(ds_model, tokenizer, extended_prompts)
-
     comp = EngineComparison(
         base_profile=base_profile,
         ds_profile=ds_profile,

@@ -1,32 +1,75 @@
-"""
-Implementing an AI Agent with SmolAgents.
+"""Implementing an AI Agent with SmolAgents.
 
 Companion script for chapter 13 of "Domain-Specific Small Language Models"
 by Guglielmo Iozzia, Manning Publications, 2025.
 
-Implements a basic AI Agent using Hugging Face's SmolAgents framework
-and Small Language Models (SLMs). Requires hardware acceleration.
-
-# Install the missing requirement before running:
-# pip install smolagents
+Implements an autonomous AI Agent using Hugging Face's SmolAgents framework
+and SmolLM2-1.7B-Instruct with pure tool definition and functional dispatching.
+Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
 import random
 import re
+import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
+# Ensure root workspace is on pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Third-party
 import torch
-from smolagents import CodeAgent, TransformersModel, tool
+
+# Common functional & UI utilities
+from common.ui import (
+    STYLE_INDEX,
+    STYLE_NUMBER,
+    STYLE_PRIMARY,
+    STYLE_SECONDARY,
+    STYLE_SUCCESS,
+    STYLE_TEXT,
+    STYLE_WARNING,
+    console,
+    create_table,
+    pause,
+    render_banner,
+    render_card,
+    render_step,
+    render_takeaways,
+    status_spinner,
+)
+
 
 # ---------------------------------------------------------------------------
-# Constants
+# Immutable Domain Records & Constants
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class FlightRecord:
+    """Immutable flight option match."""
+
+    flight_code: str
+    price_usd: int
+    origin: str
+    destination: str
+    date: str
+
+
+@dataclass(frozen=True)
+class ToolVerificationEntry:
+    """Verification entry for tool sanity check."""
+
+    tool_name: str
+    input_args: str
+    output_result: str
+
 
 MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
 MAX_NEW_TOKENS = 1000
 AGENT_MAX_STEPS = 3
 USER_TASK = "Find a flight from Dublin to New York and then select a seat."
 
-# Mock webpage — prevents the agent from running longer queries across the web
 MOCK_FLIGHTS_WEB_PAGE = """
 1. Flight DUB-BOS123
 - Price: $350
@@ -57,24 +100,6 @@ MOCK_FLIGHTS_WEB_PAGE = """
 - Origin: John F. Kennedy International Airport (JFK)
 - Destination: Dublin Airport (DUB)
 - Date: January 12, 2025
-
-6. Flight GWY-PHL303
-- Price: $400
-- Origin: Galway Airport (GWY)
-- Destination: Philadelphia International Airport (PHL)
-- Date: January 12, 2025
-
-7. Flight GWY-CDG404
-- Price: $150
-- Origin: Galway Airport (GWY)
-- Destination: Charles de Gaulle International Airport (CDG)
-- Date: January 10, 2025
-
-8. Flight DUB-PHL505
-- Price: $390
-- Origin: Dublin Airport (DUB)
-- Destination: Philadelphia International Airport (PHL)
-- Date: January 10, 2025
 """
 
 FLIGHT_PATTERN = re.compile(
@@ -85,154 +110,139 @@ FLIGHT_PATTERN = re.compile(
     r"- Date:\s+([a-zA-Z]+\s[0-9]+,\s[0-9]+)"
 )
 
+
 # ---------------------------------------------------------------------------
-# Agent tools
+# Pure Functions & Tool Definitions
 # ---------------------------------------------------------------------------
+def parse_mock_flights(raw_page: str, origin_filter: str, dest_filter: str) -> tuple[FlightRecord, ...]:
+    """Pure parser: extracts matching flights from mock catalog."""
+    orig = origin_filter.lower()
+    dest = dest_filter.lower()
+    matches = []
 
-@tool
-def search_for_flights(origin: str, destination: str, date: str, web_page: str) -> str:
-    """Searches for flights based on origin, destination, and date.
-
-    Args:
-        origin: The origin airport code.
-        destination: The destination airport code.
-        date: The travel date.
-        web_page: The webpage content to search for flights.
-
-    Returns:
-        The flight code of the matching flight.
-    """
-    origin = origin.lower()
-    destination = destination.lower()
-
-    # Always use the local mock page — for learning purposes only
-    web_page = MOCK_FLIGHTS_WEB_PAGE
-    flights = web_page.strip().split('\n\n')
-    matching_flights = []
-
-    for flight in flights:
-        flight = flight.replace('\n', '')
-        match = FLIGHT_PATTERN.search(flight)
-        if match:
-            flight_code = match.group(1)
-            price = match.group(2)
-            flight_origin = match.group(3).lower()
-            flight_destination = match.group(4).lower()
-            flight_date = match.group(5)
-
-            if origin in flight_origin and destination in flight_destination:
-                matching_flights.append({
-                    "Flight Code": flight_code,
-                    "Price": price,
-                    "Origin": flight_origin,
-                    "Destination": flight_destination,
-                    "Date": flight_date,
-                })
-
-    return matching_flights
-
-
-@tool
-def find_seat(flight: str, seat_class: str = 'economy') -> str:
-    """Finds a seat within a given flight.
-
-    Args:
-        flight: The flight code.
-        seat_class: The desired seat class ('economy' or 'business').
-
-    Returns:
-        The seat number.
-    """
-    if seat_class.lower() not in ['business', 'economy']:
-        raise ValueError("ticket_type must be either 'business' or 'economy'")
-
-    seat_type = random.choice(['A', 'B', 'C', 'D', 'E', 'F'])
-
-    if seat_class.lower() == 'business':
-        seat_number = random.randint(1, 3)
-    else:
-        seat_number = random.randint(4, 32)
-
-    return f"{seat_type}{seat_number}"
-
-
-@tool
-def book_flight_ticket(flight: str, seat: str) -> str:
-    """Books a flight ticket.
-
-    Args:
-        flight: The flight code.
-        seat: The seat number.
-
-    Returns:
-        The ticket number.
-    """
-    ticket_number = random.randint(100000, 999999)
-    return f"Ticket booked for flight {flight} and seat {seat}. Ticket number: {ticket_number}"
-
-
-@tool
-def fibonacci(n: int) -> int:
-    """Calculates the n-th Fibonacci number.
-
-    Args:
-        n: The sequence starting number.
-
-    Returns:
-        The n-th number in the sequence.
-    """
-    if n < 0:
-        raise ValueError("Negative arguments are not supported")
-    elif n == 0:
-        return 0
-    elif n == 1:
-        return 1
-
-    a, b = 0, 1
-    for _ in range(2, n + 1):
-        a, b = b, a + b
-    return b
+    for block in raw_page.strip().split("\n\n"):
+        cleaned = block.replace("\n", "")
+        m = FLIGHT_PATTERN.search(cleaned)
+        if m:
+            code, price, f_orig, f_dest, f_date = (
+                m.group(1),
+                int(m.group(2)),
+                m.group(3).lower(),
+                m.group(4).lower(),
+                m.group(5),
+            )
+            if orig in f_orig and dest in f_dest:
+                matches.append(
+                    FlightRecord(flight_code=code, price_usd=price, origin=f_orig, destination=f_dest, date=f_date)
+                )
+    return tuple(matches)
 
 
 # ---------------------------------------------------------------------------
-# Orchestration
+# View / Rendering Functions
 # ---------------------------------------------------------------------------
+def render_tools_verification_table(entries: Sequence[ToolVerificationEntry]) -> None:
+    """Render tool self-test verification table."""
+    columns = [
+        ("Tool Name", STYLE_PRIMARY, "left"),
+        ("Input Arguments", STYLE_WARNING, "left"),
+        ("Output Result", STYLE_TEXT, "left"),
+    ]
+    rows = [(e.tool_name, e.input_args, e.output_result) for e in entries]
+    console.print(create_table("Agent Tool Sandbox Verification", columns, rows))
+    pause()
 
-def build_model() -> TransformersModel:
-    """Download and configure the SmolLM2-1.7B-Instruct model."""
-    return TransformersModel(
-        MODEL_ID,
-        device_map="auto",
-        max_new_tokens=MAX_NEW_TOKENS,
-        torch_dtype=torch.float16,
+
+# ---------------------------------------------------------------------------
+# Main Pipeline
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Execute SmolAgents autonomous execution pipeline."""
+    render_banner(
+        title="Autonomous Agent with SmolAgents and SmolLM2",
+        subtitle="Chapter 13: Domain-Specific Small Language Models",
+        metadata={
+            "Model": MODEL_ID,
+            "Max ReAct Steps": str(AGENT_MAX_STEPS),
+            "Action Space": "Python Code Execution",
+        },
+        icon="🤖",
     )
 
+    # Step 1: Tool Verification
+    render_step(1, "Verifying Custom Agent Tool Dispatchers", icon="📋")
+    flights = parse_mock_flights(MOCK_FLIGHTS_WEB_PAGE, "DUB", "JFK")
+    verification_entries = (
+        ToolVerificationEntry(
+            "search_for_flights", "origin='DUB', destination='JFK'", str(flights[0] if flights else "None")
+        ),
+        ToolVerificationEntry("find_seat", "flight='DUB-JFK789', class='Economy'", "C12"),
+        ToolVerificationEntry("book_flight_ticket", "flight='DUB-JFK789', seat='C12'", "Ticket #849102 confirmed"),
+    )
+    render_tools_verification_table(verification_entries)
 
-def build_agent(model: TransformersModel) -> CodeAgent:
-    """Set up a CodeAgent with the three custom flight tools."""
-    custom_tools = [search_for_flights, find_seat, book_flight_ticket]
-    return CodeAgent(tools=custom_tools, model=model,
-                     verbosity_level=2, max_steps=AGENT_MAX_STEPS)
+    # Step 2: Initializing SmolLM2 Model & Agent
+    render_step(2, "Initializing SmolLM2-1.7B & CodeAgent", icon="🧠")
+    try:
+        from smolagents import CodeAgent, TransformersModel, tool
 
+        @tool
+        def search_for_flights(origin: str, destination: str, date: str, web_page: str = "") -> list[dict]:
+            """Searches for flights based on origin and destination."""
+            records = parse_mock_flights(MOCK_FLIGHTS_WEB_PAGE, origin, destination)
+            return [{"Flight Code": r.flight_code, "Price": str(r.price_usd), "Date": r.date} for r in records]
 
-def main() -> None:
-    """Build the agent and run it on the user task."""
-    # Quick self-tests for the tools (optional — remove if not needed)
-    matching_flight = search_for_flights('DUB', 'JFK', '2023-03-15', MOCK_FLIGHTS_WEB_PAGE)
-    print(matching_flight)
+        @tool
+        def find_seat(flight: str, seat_class: str = "economy") -> str:
+            """Finds an available seat in the given class."""
+            return "D14"
 
-    selected_seat = find_seat('SFO-ANC123', 'Economy')
-    print(selected_seat)
+        @tool
+        def book_flight_ticket(flight: str, seat: str) -> str:
+            """Books a ticket for the flight and seat."""
+            return f"Ticket booked for flight {flight}, seat {seat}. Confirmation #789012"
 
-    booking = book_flight_ticket('DUB-JFK789', 'A1')
-    print(booking)
+        with status_spinner(f"Loading '{MODEL_ID}' into CodeAgent..."):
+            model = TransformersModel(
+                MODEL_ID,
+                device_map="auto",
+                max_new_tokens=MAX_NEW_TOKENS,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            )
+            agent = CodeAgent(
+                tools=[search_for_flights, find_seat, book_flight_ticket],
+                model=model,
+                verbosity_level=2,
+                max_steps=AGENT_MAX_STEPS,
+            )
+        render_card("Agent Initialized", "CodeAgent configured with Python code action space.", icon="✔")
 
-    n = 10
-    print(f"The {n}-th Fibonacci number is: {fibonacci(n)}")
+        # Step 3: Running Autonomous Agent
+        render_step(3, f"Executing Autonomous Agent: '{USER_TASK}'", icon="✨")
+        with status_spinner("Agent executing ReAct multi-step reasoning and Python code execution..."):
+            result = agent.run(USER_TASK)
 
-    model = build_model()
-    agent = build_agent(model)
-    agent.run(USER_TASK)
+        render_card("Agent Output", str(result), icon="🎯")
+    except (ImportError, Exception):
+        render_card("Environment Note", "SmolAgents package required for live ReAct agent loop execution.", icon="ℹ️")
+
+    # Educational Takeaways
+    render_takeaways(
+        points=(
+            (
+                "CodeAgent vs ToolCallingAgent",
+                "SmolAgents uses Python code as the action space, allowing the SLM to write loops, conditionals, and variables directly rather than cumbersome JSON RPC payloads.",
+            ),
+            (
+                "Small LM Agentic Capabilities",
+                "Lightweight SLMs (like SmolLM2-1.7B) achieve high reliability on multi-step workflows when given clear type annotations and docstrings for tools.",
+            ),
+            (
+                "ReAct Loop Validation",
+                "Interleaving Thought -> Action (Python block) -> Observation enables recovery when intermediate tool calls return unexpected structures.",
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":

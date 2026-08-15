@@ -1,221 +1,296 @@
-"""Fine-tune DistilBERT for extractive question answering on a SQuAD subset.
+"""Fine-tuning a Language Model on SQuAD with Span Mapping.
 
 Companion script for Chapter 2 of "Domain Specific LLMs in Action"
-by Guglielmo Iozzia, Manning Publications, 2024.
+(Guglielmo Iozzia, Manning Publications, 2024).
 
-Demonstrates end-to-end QA fine-tuning on DistilBERT-base-uncased:
-data prep → tokenisation → fine-tuning → inference.
-Hardware acceleration (GPU) is recommended for the fine-tuning step.
-
-# Install missing requirements first (Colab / fresh env):
-# !pip install datasets accelerate
+Demonstrates preparing the SQuAD dataset for extractive question answering,
+token-to-character span alignment using tokenizer offset mappings, and fine-tuning
+an encoder model (distilbert-base-uncased).
+Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
-# ---------------------------------------------------------------------------
-# Standard library
-# ---------------------------------------------------------------------------
-from __future__ import annotations
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-# ---------------------------------------------------------------------------
+# Ensure root workspace is on pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # Third-party
-# ---------------------------------------------------------------------------
-import torch
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from transformers import (
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     DefaultDataCollator,
     Trainer,
     TrainingArguments,
+    pipeline,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DATASET_NAME = "rajpurkar/squad"
-DATASET_SPLIT = "train[:5000]"
-MODEL_NAME = "distilbert-base-uncased"
-OUTPUT_DIR = "my_awesome_qa_model"
-MAX_SEQ_LENGTH = 384
-LEARNING_RATE = 2e-5
-TRAIN_BATCH_SIZE = 16
-EVAL_BATCH_SIZE = 16
-NUM_EPOCHS = 5
-WEIGHT_DECAY = 0.01
-TEST_SIZE = 0.2
-
-# Sample question/context used for the inference demo
-DEMO_QUESTION = "How many official league titles has Juventus won?"
-DEMO_CONTEXT = (
-    "Juventus Football Club (from Latin: iuventūs), colloquially known as Juve, "
-    "is a professional football club based in Turin, Piedmont, Italy, that competes "
-    "in the Serie A, the top tier of the Italian football league system. Founded in "
-    "1897 by a group of Torinese students, the club has worn a black and white striped "
-    "home kit since 1903 and has played home matches in different grounds around its "
-    "city, the latest being the 41,507-capacity Juventus Stadium. Nicknamed la Vecchia "
-    "Signora (the Old Lady), the club has won 36 official league titles, 14 Coppa Italia "
-    "titles and nine Supercoppa Italiana titles, being the record holder for all these "
-    "competitions;"
+# Common functional & UI utilities
+from common.ui import (
+    STYLE_INDEX,
+    STYLE_PRIMARY,
+    STYLE_SECONDARY,
+    STYLE_TEXT,
+    console,
+    create_table,
+    pause,
+    render_banner,
+    render_card,
+    render_step,
+    render_takeaways,
+    status_spinner,
 )
 
 
 # ---------------------------------------------------------------------------
-# Data preparation
+# Immutable Domain Records & Constants
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class QASample:
+    """Immutable representation of a Question-Answering instance."""
 
-def load_and_split_dataset(tokenizer: AutoTokenizer):
-    """Load a SQuAD subset and split it 80/20 into train and test."""
-    squad = load_dataset(DATASET_NAME, split=DATASET_SPLIT)
-    squad = squad.train_test_split(test_size=TEST_SIZE)
-    print(squad["train"][0])
-    return squad
+    question: str
+    context: str
+    answer_text: str
+    start_char: int
 
 
-def preprocess_function(examples: dict, tokenizer: AutoTokenizer) -> dict:
-    """Tokenise QA examples and map answer character spans to token positions.
+@dataclass(frozen=True)
+class SpanIndices:
+    """Immutable token span boundary representation."""
 
-    Handles long contexts via truncation of the context only, and uses offset
-    mapping to locate start/end token positions of each answer.
-    """
+    start_token: int
+    end_token: int
+
+
+MODEL_ID = "distilbert/distilbert-base-uncased"
+MAX_LENGTH = 384
+STRIDE = 128
+TRAIN_SAMPLES = 100
+EVAL_SAMPLES = 50
+OUTPUT_DIR = "my_squad_model"
+SAMPLE_QUESTION = "How many members does the band have?"
+SAMPLE_CONTEXT = "The band consists of 4 members: John, Paul, George, and Ringo."
+
+
+# ---------------------------------------------------------------------------
+# Pure Span Alignment Logic
+# ---------------------------------------------------------------------------
+def compute_token_span(
+    offset: Sequence[tuple[int, int]],
+    sequence_ids: Sequence[int | None],
+    start_char: int,
+    end_char: int,
+) -> SpanIndices:
+    """Pure function: calculate token start/end indices for a character range."""
+    # Find context boundaries in sequence_ids
+    context_indices = [i for i, sid in enumerate(sequence_ids) if sid == 1]
+    if not context_indices:
+        return SpanIndices(0, 0)
+
+    context_start, context_end = context_indices[0], context_indices[-1]
+
+    # Check if answer is contained within this context chunk
+    if offset[context_start][0] > end_char or offset[context_end][1] < start_char:
+        return SpanIndices(0, 0)
+
+    # Locate start token
+    start_idx = context_start
+    while start_idx <= context_end and offset[start_idx][0] <= start_char:
+        start_idx += 1
+    token_start = start_idx - 1
+
+    # Locate end token
+    end_idx = context_end
+    while end_idx >= context_start and offset[end_idx][1] >= end_char:
+        end_idx -= 1
+    token_end = end_idx + 1
+
+    return SpanIndices(token_start, token_end)
+
+
+def preprocess_training_examples(examples: Mapping[str, Any], tokenizer: Any) -> dict[str, Any]:
+    """Pure batch mapping function: tokenizes text and aligns ground-truth spans."""
     questions = [q.strip() for q in examples["question"]]
     inputs = tokenizer(
         questions,
         examples["context"],
-        max_length=MAX_SEQ_LENGTH,
+        max_length=MAX_LENGTH,
         truncation="only_second",
+        stride=STRIDE,
+        return_overflowing_tokens=True,
         return_offsets_mapping=True,
         padding="max_length",
     )
 
     offset_mapping = inputs.pop("offset_mapping")
+    sample_map = inputs.pop("overflow_to_sample_mapping")
     answers = examples["answers"]
-    start_positions: list[int] = []
-    end_positions: list[int] = []
 
-    for i, offset in enumerate(offset_mapping):
-        answer = answers[i]
-        start_char = answer["answer_start"][0]
-        end_char = answer["answer_start"][0] + len(answer["text"][0])
-        sequence_ids = inputs.sequence_ids(i)
+    spans = [
+        compute_token_span(
+            offset=offset,
+            sequence_ids=inputs.sequence_ids(i),
+            start_char=answers[sample_map[i]]["answer_start"][0],
+            end_char=answers[sample_map[i]]["answer_start"][0] + len(answers[sample_map[i]]["text"][0]),
+        )
+        for i, offset in enumerate(offset_mapping)
+    ]
 
-        # Find the start and end of the context
-        idx = 0
-        while sequence_ids[idx] != 1:
-            idx += 1
-        context_start = idx
-        while sequence_ids[idx] == 1:
-            idx += 1
-        context_end = idx - 1
-
-        # If the answer is not fully inside the context, label it (0, 0)
-        if offset[context_start][0] > end_char or offset[context_end][1] < start_char:
-            start_positions.append(0)
-            end_positions.append(0)
-        else:
-            # Otherwise it's the start and end token positions
-            idx = context_start
-            while idx <= context_end and offset[idx][0] <= start_char:
-                idx += 1
-            start_positions.append(idx - 1)
-
-            idx = context_end
-            while idx >= context_start and offset[idx][1] >= end_char:
-                idx -= 1
-            end_positions.append(idx + 1)
-
-    inputs["start_positions"] = start_positions
-    inputs["end_positions"] = end_positions
+    inputs["start_positions"] = [span.start_token for span in spans]
+    inputs["end_positions"] = [span.end_token for span in spans]
     return inputs
 
 
-def tokenise_dataset(squad, tokenizer: AutoTokenizer):
-    """Apply preprocessing across the full dataset in batches."""
-    return squad.map(
-        lambda examples: preprocess_function(examples, tokenizer),
-        batched=True,
-        remove_columns=squad["train"].column_names,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Fine-tuning
-# ---------------------------------------------------------------------------
-
-def fine_tune(tokenized_squad, tokenizer: AutoTokenizer) -> Trainer:
-    """Load DistilBERT and fine-tune it for QA; return the trained Trainer."""
-    model = AutoModelForQuestionAnswering.from_pretrained(
-        MODEL_NAME, device_map="auto"
-    )
-    data_collator = DefaultDataCollator()
-
-    training_args = TrainingArguments(
-        output_dir=OUTPUT_DIR,
+def create_training_arguments(output_dir: str) -> TrainingArguments:
+    """Pure factory for training configuration."""
+    return TrainingArguments(
+        output_dir=output_dir,
         eval_strategy="epoch",
-        learning_rate=LEARNING_RATE,
-        per_device_train_batch_size=TRAIN_BATCH_SIZE,
-        per_device_eval_batch_size=EVAL_BATCH_SIZE,
-        num_train_epochs=NUM_EPOCHS,
-        weight_decay=WEIGHT_DECAY,
+        learning_rate=2e-5,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
+        num_train_epochs=3,
+        weight_decay=0.01,
         push_to_hub=False,
-        report_to="none",
     )
 
+
+# ---------------------------------------------------------------------------
+# View / Rendering Functions
+# ---------------------------------------------------------------------------
+def render_sample_table(sample: QASample) -> None:
+    """Render sample training record in an eye-friendly table."""
+    columns = [
+        ("Field", STYLE_PRIMARY, "left"),
+        ("Content", STYLE_TEXT, "left"),
+    ]
+    rows = [
+        ("Question", sample.question),
+        ("Context Preview", sample.context[:160] + "..."),
+        ("Ground Truth Answer", sample.answer_text),
+        ("Start Character Position", str(sample.start_char)),
+    ]
+    console.print(create_table("Sample SQuAD Training Record", columns, rows))
+    pause()
+
+
+# ---------------------------------------------------------------------------
+# Main Pipeline
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Execute SQuAD extractive question-answering training workflow."""
+    render_banner(
+        title="Fine-Tuning DistilBERT on SQuAD with Span Mapping",
+        subtitle="Chapter 2: Domain-Specific Small Language Models",
+        metadata={
+            "Base Model": MODEL_ID,
+            "Train Subset": f"{TRAIN_SAMPLES} samples",
+            "Eval Subset": f"{EVAL_SAMPLES} samples",
+        },
+        icon="🚀",
+    )
+
+    # Step 1: Loading Dataset & Tokenizer
+    render_step(1, "Loading SQuAD Dataset & Subword Tokenizer", icon="📋")
+    with status_spinner("Loading SQuAD dataset partition from Hugging Face..."):
+        squad_train = load_dataset("squad", split=f"train[:{TRAIN_SAMPLES}]")
+        squad_eval = load_dataset("squad", split=f"validation[:{EVAL_SAMPLES}]")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
+    first_item = squad_train[0]
+    sample_record = QASample(
+        question=first_item["question"],
+        context=first_item["context"],
+        answer_text=first_item["answers"]["text"][0],
+        start_char=first_item["answers"]["answer_start"][0],
+    )
+    render_sample_table(sample_record)
+
+    # Step 2: Preprocessing & Span Alignment
+    render_step(2, "Preprocessing & Mapping Subword Token Spans", icon="⚙️")
+    with status_spinner("Mapping character offsets to subword token boundaries..."):
+        train_dataset = squad_train.map(
+            lambda ex: preprocess_training_examples(ex, tokenizer),
+            batched=True,
+            remove_columns=squad_train.column_names,
+        )
+        eval_dataset = squad_eval.map(
+            lambda ex: preprocess_training_examples(ex, tokenizer),
+            batched=True,
+            remove_columns=squad_eval.column_names,
+        )
+
+    render_card(
+        title="Span Alignment Statistics",
+        content=(
+            f"[text.muted]Generated Training Chunks:[/text.muted] [text.highlight]{len(train_dataset)}[/text.highlight]\n"
+            f"[text.muted]Generated Validation Chunks:[/text.muted] [text.highlight]{len(eval_dataset)}[/text.highlight]\n"
+            f"[text.muted]Window Stride:[/text.muted] [brand.secondary]{STRIDE} tokens[/brand.secondary]"
+        ),
+        icon="✔",
+    )
+
+    # Step 3: Model & Trainer Setup
+    render_step(3, "Initializing Model & Training Configuration", icon="🧠")
+    with status_spinner(f"Loading QA head for '{MODEL_ID}'..."):
+        model = AutoModelForQuestionAnswering.from_pretrained(MODEL_ID)
+
+    training_args = create_training_arguments(OUTPUT_DIR)
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_squad["train"],
-        eval_dataset=tokenized_squad["test"],
-        processing_class=tokenizer,
-        data_collator=data_collator,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        tokenizer=tokenizer,
+        data_collator=DefaultDataCollator(),
     )
-    trainer.train()
-    return trainer
 
+    # Step 4: Training Execution
+    render_step(4, "Executing DistilBERT Fine-Tuning", icon="🏋️")
+    with status_spinner("Running fine-tuning loop..."):
+        trainer.train()
+    render_card("Training Status", "DistilBERT fine-tuning completed successfully.", icon="✔")
 
-# ---------------------------------------------------------------------------
-# Inference
-# ---------------------------------------------------------------------------
+    # Step 5: Extractive QA Pipeline Inference
+    render_step(5, "Evaluating Extractive QA Pipeline", icon="🎯")
+    with status_spinner("Running extractive span prediction..."):
+        question_answerer = pipeline("question-answering", model=model, tokenizer=tokenizer)
+        prediction = question_answerer(question=SAMPLE_QUESTION, context=SAMPLE_CONTEXT)
 
-def run_inference(model, tokenizer: AutoTokenizer) -> None:
-    """Run the fine-tuned model on a demo question and print the decoded answer."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    render_card(
+        title="Extractive QA Inference Result",
+        content=(
+            f"[text.muted]Context:[/text.muted] [text.main]{SAMPLE_CONTEXT}[/text.main]\n"
+            f"[text.muted]Question:[/text.muted] [text.main]{SAMPLE_QUESTION}[/text.main]\n\n"
+            f"[status.success]Extracted Answer:[/status.success] [text.highlight]{prediction['answer']}[/text.highlight]\n"
+            f"[text.muted]Confidence Score:[/text.muted] [status.warning]{prediction['score']:.4f}[/status.warning]  •  "
+            f"[text.muted]Span:[/text.muted] [brand.secondary][{prediction['start']}:{prediction['end']}][/brand.secondary]"
+        ),
+        icon="✨",
+    )
 
-    inputs = tokenizer(DEMO_QUESTION, DEMO_CONTEXT, return_tensors="pt")
-    inputs.to(device)
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    answer_start_index = outputs.start_logits.argmax()
-    answer_end_index = outputs.end_logits.argmax()
-
-    # Guard against inverted span predictions
-    if answer_end_index < answer_start_index:
-        answer_end_index = answer_start_index
-
-    predict_answer_tokens = inputs.input_ids[0, answer_start_index : answer_end_index + 1]
-    decoded_answer = tokenizer.decode(predict_answer_tokens, skip_special_tokens=True)
-
-    print(f"Decoded answer: {decoded_answer}")
-
-    # Also decode the full input tokens to better understand the context and tokenization
-    print(tokenizer.decode(inputs.input_ids[0], skip_special_tokens=False))
-
-
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    """End-to-end pipeline: data prep → fine-tuning → inference."""
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    squad = load_and_split_dataset(tokenizer)
-    tokenized_squad = tokenise_dataset(squad, tokenizer)
-
-    trainer = fine_tune(tokenized_squad, tokenizer)
-
-    run_inference(trainer.model, tokenizer)
+    # Educational Takeaways
+    render_takeaways(
+        points=(
+            (
+                "Extractive vs Generative QA",
+                "In extractive QA, the model does not generate new text; it classifies which token in the input context is the start of the answer and which is the end.",
+            ),
+            (
+                "Sliding Window (Stride)",
+                "When context exceeds MAX_LENGTH=384, the text is split into overlapping chunks with STRIDE=128 to prevent answer boundary cuts.",
+            ),
+            (
+                "Token Offset Mapping",
+                "Because tokenizers break words into subwords (e.g., 'playing' -> 'play', '##ing'), offset mappings are critical to align character-level annotations with token indices.",
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":

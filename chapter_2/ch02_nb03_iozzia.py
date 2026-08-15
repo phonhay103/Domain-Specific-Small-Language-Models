@@ -1,32 +1,28 @@
-"""Fine-tune FLAN-T5 Small for text summarisation using LoRA (PEFT).
+"""Dialogue Summarization with FLAN-T5-base and PEFT LoRA.
 
 Companion script for Chapter 2 of "Domain Specific LLMs in Action"
-by Guglielmo Iozzia, Manning Publications, 2025.
+(Guglielmo Iozzia, Manning Publications, 2024).
 
-Introduces LoRA (Low-Rank Adaptation) via the HF PEFT library applied to
-FLAN-T5 Small, trained on the SAMSum dialogue-summarisation dataset.
-Evaluation uses ROUGE metrics.  A GPU is required.
-
-# Install missing requirements first (Colab / fresh env):
-# !pip install datasets peft accelerate bitsandbytes evaluate rouge_score py7zr
+Demonstrates parameter-efficient fine-tuning (PEFT) using LoRA (Low-Rank Adaptation)
+on the SAMSum dataset for dialogue summarization, evaluated with ROUGE metrics.
+Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
-# ---------------------------------------------------------------------------
-# Standard library
-# ---------------------------------------------------------------------------
-from __future__ import annotations
-import locale
-from random import randrange
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from time import time as current_time
+from typing import Any
 
-# ---------------------------------------------------------------------------
+# Ensure root workspace is on pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # Third-party
-# ---------------------------------------------------------------------------
 import evaluate
 import numpy as np
-import torch
-from datasets import concatenate_datasets, load_dataset, load_from_disk
-from peft import LoraConfig, PeftConfig, PeftModel, TaskType, get_peft_model, prepare_model_for_kbit_training
-from tqdm import tqdm
+from datasets import DatasetDict, concatenate_datasets, load_dataset
+from peft import AutoPeftModelForSeq2SeqLM, LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -35,288 +31,332 @@ from transformers import (
     Seq2SeqTrainingArguments,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DATASET_NAME = "knkarthick/samsum"
-MODEL_ID = "google/flan-t5-small"
-OUTPUT_DIR = "lora-flan-t5-small"
-LORA_MODEL_ID = "flan_t5_lora"
-TRAIN_DATA_PATH = "data/train"
-EVAL_DATA_PATH = "data/eval"
+# Common functional & UI utilities
+from common.functional import calculate_speedup, format_percentage
+from common.ui import (
+    STYLE_INDEX,
+    STYLE_NUMBER,
+    STYLE_PRIMARY,
+    STYLE_SECONDARY,
+    STYLE_SUCCESS,
+    STYLE_TEXT,
+    STYLE_WARNING,
+    console,
+    create_table,
+    pause,
+    render_banner,
+    render_card,
+    render_step,
+    render_takeaways,
+    status_spinner,
+)
 
-# Percentile thresholds for computing max sequence lengths
-INPUT_LENGTH_PERCENTILE = 85
-TARGET_LENGTH_PERCENTILE = 90
 
-# LoRA configuration
-LORA_RANK = 16
+# ---------------------------------------------------------------------------
+# Immutable Domain Records & Constants
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class LoRAParamStats:
+    """Immutable representation of model parameter counts under LoRA."""
+
+    trainable_params: int
+    total_params: int
+    trainable_ratio: float
+
+
+@dataclass(frozen=True)
+class LengthPercentiles:
+    """Immutable representation of sequence length quantiles."""
+
+    percentile: int
+    dialogue_length: int
+    summary_length: int
+
+
+MODEL_ID = "google/flan-t5-base"
+DATASET_ID = "samsum"
+MAX_SOURCE_LENGTH = 512
+MAX_TARGET_LENGTH = 50
+LORA_R = 16
 LORA_ALPHA = 32
-LORA_TARGET_MODULES = ["q", "v"]
 LORA_DROPOUT = 0.05
-
-# Training hyperparameters
+OUTPUT_DIR = "experiments"
+EPOCHS = 5
+BATCH_SIZE = 8
 LEARNING_RATE = 1e-3
-NUM_TRAIN_EPOCHS = 3
-LOGGING_STEPS = 500
-
-# Inference
-MAX_NEW_TOKENS_INFERENCE = 10
-TOP_P = 0.9
-MAX_EVAL_TARGET_LENGTH = 50
-
-LABEL_PAD_TOKEN_ID = -100
 
 
 # ---------------------------------------------------------------------------
-# Locale fix (needed in some Colab/container environments)
+# Pure Functions & Data Transformations
 # ---------------------------------------------------------------------------
-
-def _patch_locale() -> None:
-    """Wrap locale.getpreferredencoding to avoid encoding issues in some VMs."""
-    original = locale.getpreferredencoding
-    locale.getpreferredencoding = lambda do_raise=True: original()
-
-
-# ---------------------------------------------------------------------------
-# Data preparation
-# ---------------------------------------------------------------------------
-
-def load_raw_dataset():
-    """Load the SAMSum dataset from the HF Hub and print split sizes."""
-    dataset = load_dataset(DATASET_NAME, trust_remote_code=True)
-    print(f"Train dataset size: {len(dataset['train'])}")
-    print(f"Test dataset size: {len(dataset['test'])}")
-    return dataset
-
-
-def compute_max_lengths(dataset, tokenizer) -> tuple[int, int]:
-    """Compute max source and target lengths using percentile thresholds.
-
-    For the input, we take the 85th percentile of the max length for better utilization.
-    For the target, we take the 90th percentile of the max length for better utilization.
-    """
+def compute_length_percentiles(
+    dataset: DatasetDict,
+    tokenizer: Any,
+    percentiles: Sequence[int] = (80, 85, 90, 95, 100),
+) -> tuple[LengthPercentiles, ...]:
+    """Pure analysis: calculate token length distributions across train/test splits."""
     combined = concatenate_datasets([dataset["train"], dataset["test"]])
 
-    tokenized_inputs = [
-        tokenizer(text=ex["dialogue"], truncation=True)["input_ids"]
-        for ex in combined
-        if ex["dialogue"] is not None
-    ]
-    max_source_length = int(np.percentile([len(x) for x in tokenized_inputs], INPUT_LENGTH_PERCENTILE))
-    print(f"Max source length: {max_source_length}")
+    tokenized_inputs = combined.map(
+        lambda x: tokenizer(x["dialogue"], truncation=True),
+        batched=True,
+        remove_columns=["dialogue", "summary"],
+    )
+    input_lengths = [len(x) for x in tokenized_inputs["input_ids"]]
 
-    tokenized_targets = concatenate_datasets([dataset["train"], dataset["test"]]).map(
+    tokenized_targets = combined.map(
         lambda x: tokenizer(x["summary"], truncation=True),
         batched=True,
         remove_columns=["dialogue", "summary"],
     )
-    max_target_length = int(np.percentile([len(x) for x in tokenized_targets["input_ids"]], TARGET_LENGTH_PERCENTILE))
-    print(f"Max target length: {max_target_length}")
+    target_lengths = [len(x) for x in tokenized_targets["input_ids"]]
 
-    return max_source_length, max_target_length
+    return tuple(
+        LengthPercentiles(
+            percentile=p,
+            dialogue_length=int(np.percentile(input_lengths, p)),
+            summary_length=int(np.percentile(target_lengths, p)),
+        )
+        for p in percentiles
+    )
 
 
-def build_preprocess_fn(tokenizer, max_source_length: int, max_target_length: int):
-    """Return a batched preprocessing function closed over tokenizer and lengths."""
+def format_dialogue_prompt(dialogue: str) -> str:
+    """Pure string formatter for FLAN-T5 instruction."""
+    return f"Summarize the following conversation.\n\n{dialogue}"
 
-    def preprocess_function(sample: dict, padding: str = "max_length") -> dict:
-        """Tokenise dialogue/summary pairs; replace pad tokens in labels with -100."""
-        # Filter out examples where dialogue is None and keep corresponding summaries
-        processed = [
-            (d, s)
-            for d, s in zip(sample["dialogue"], sample["summary"])
-            if d is not None
+
+def preprocess_batch(sample: Mapping[str, Any], tokenizer: Any, padding: str = "max_length") -> dict[str, Any]:
+    """Pure batch preprocessor: prepends instruction prompt and encodes targets."""
+    inputs = [format_dialogue_prompt(item) for item in sample["dialogue"]]
+    model_inputs = tokenizer(inputs, max_length=MAX_SOURCE_LENGTH, padding=padding, truncation=True)
+    labels = tokenizer(
+        text_target=sample["summary"],
+        max_length=MAX_TARGET_LENGTH,
+        padding=padding,
+        truncation=True,
+    )
+
+    if padding == "max_length":
+        labels["input_ids"] = [
+            [(label_id if label_id != tokenizer.pad_token_id else -100) for label_id in label_seq]
+            for label_seq in labels["input_ids"]
         ]
-        inputs = [f"summarize: {d}" for d, _ in processed]
-        labels_text = [s for _, s in processed]
 
-        model_inputs = tokenizer(
-            inputs, max_length=max_source_length, padding=padding, truncation=True
-        )
-        labels = tokenizer(
-            text_target=labels_text,
-            max_length=max_target_length,
-            padding=padding,
-            truncation=True,
-        )
-
-        if padding == "max_length":
-            labels["input_ids"] = [
-                [(l if l != tokenizer.pad_token_id else LABEL_PAD_TOKEN_ID) for l in label]
-                for label in labels["input_ids"]
-            ]
-
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
-
-    return preprocess_function
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
 
 
-def prepare_tokenized_dataset(dataset, tokenizer, max_source_length: int, max_target_length: int):
-    """Tokenise, save to disk, and return the tokenized dataset."""
-    preprocess_fn = build_preprocess_fn(tokenizer, max_source_length, max_target_length)
-    tokenized_dataset = dataset.map(
-        preprocess_fn,
-        batched=True,
-        remove_columns=["dialogue", "summary", "id"],
-    )
-    print(f"Keys of tokenized dataset: {list(tokenized_dataset['train'].features)}")
-
-    tokenized_dataset["train"].save_to_disk(TRAIN_DATA_PATH)
-    tokenized_dataset["test"].save_to_disk(EVAL_DATA_PATH)
-    return tokenized_dataset
-
-
-# ---------------------------------------------------------------------------
-# LoRA fine-tuning
-# ---------------------------------------------------------------------------
-
-def build_lora_model(model_id: str):
-    """Load the base model in 8-bit, attach LoRA adapters, and return it."""
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        model_id, load_in_8bit=True, device_map="auto"
-    )
-
-    lora_config = LoraConfig(
-        r=LORA_RANK,
+def create_lora_config() -> LoraConfig:
+    """Pure factory for LoRA PEFT configuration."""
+    return LoraConfig(
+        r=LORA_R,
         lora_alpha=LORA_ALPHA,
-        target_modules=LORA_TARGET_MODULES,
+        target_modules=["q", "v"],
         lora_dropout=LORA_DROPOUT,
         bias="none",
         task_type=TaskType.SEQ_2_SEQ_LM,
     )
 
-    model = prepare_model_for_kbit_training(model)
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-    return model
 
-
-def fine_tune(model, tokenizer, tokenized_dataset) -> Seq2SeqTrainer:
-    """Set up Seq2SeqTrainer and run fine-tuning; return the trainer."""
-    # At the end of the execution above, trainable params should be <1% of total.
-    # Training process is the same as regular LLM training;
-    # the key difference is the LoRA-adapted model.
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer,
-        model=model,
-        label_pad_token_id=LABEL_PAD_TOKEN_ID,
-        pad_to_multiple_of=8,
-    )
-
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=OUTPUT_DIR,
+def create_training_args(output_dir: str) -> Seq2SeqTrainingArguments:
+    """Pure factory for seq2seq training arguments."""
+    return Seq2SeqTrainingArguments(
+        output_dir=output_dir,
         auto_find_batch_size=True,
         learning_rate=LEARNING_RATE,
-        num_train_epochs=NUM_TRAIN_EPOCHS,
-        logging_dir=f"{OUTPUT_DIR}/logs",
+        num_train_epochs=EPOCHS,
+        logging_dir=f"{output_dir}/logs",
         logging_strategy="steps",
-        logging_steps=LOGGING_STEPS,
+        logging_steps=500,
         save_strategy="no",
         report_to="tensorboard",
     )
 
+
+# ---------------------------------------------------------------------------
+# View / Rendering Functions
+# ---------------------------------------------------------------------------
+def render_dataset_stats(dataset: DatasetDict) -> None:
+    """Render dataset partition sizes."""
+    columns = [
+        ("Dataset Split", STYLE_PRIMARY, "left"),
+        ("Dialogue Count", STYLE_NUMBER, "right"),
+    ]
+    rows = [(split_name.capitalize(), f"{len(split_data):,}") for split_name, split_data in dataset.items()]
+    console.print(create_table("SAMSum Dataset Partition Statistics", columns, rows))
+    pause()
+
+
+def render_percentiles_table(stats: Sequence[LengthPercentiles]) -> None:
+    """Render length percentiles in an eye-friendly table."""
+    columns = [
+        ("Percentile", STYLE_PRIMARY, "center"),
+        ("Dialogue Token Length", STYLE_SECONDARY, "right"),
+        ("Summary Token Length", STYLE_WARNING, "right"),
+    ]
+    rows = [(f"{s.percentile}%", str(s.dialogue_length), str(s.summary_length)) for s in stats]
+    console.print(create_table("Token Length Distribution (Percentiles)", columns, rows))
+    pause()
+
+
+def render_param_stats_table(stats: LoRAParamStats) -> None:
+    """Render parameter efficiency table."""
+    columns = [
+        ("Parameter Metric", STYLE_PRIMARY, "left"),
+        ("Value", STYLE_SUCCESS, "right"),
+    ]
+    rows = [
+        ("Trainable LoRA Parameters", f"{stats.trainable_params:,}"),
+        ("Total Model Parameters", f"{stats.total_params:,}"),
+        ("Trainable Proportion", f"{stats.trainable_ratio:.2f}%"),
+        ("Frozen Base Proportion", f"{100.0 - stats.trainable_ratio:.2f}%"),
+    ]
+    console.print(create_table("LoRA Parameter Efficiency", columns, rows))
+    pause()
+
+
+# ---------------------------------------------------------------------------
+# Main Pipeline
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Execute functional dialogue summarization with FLAN-T5 and LoRA."""
+    render_banner(
+        title="Dialogue Summarization with FLAN-T5 & PEFT LoRA",
+        subtitle="Chapter 2: Domain-Specific Small Language Models",
+        metadata={
+            "Model": MODEL_ID,
+            "Dataset": DATASET_ID,
+            "LoRA Rank": str(LORA_R),
+            "LoRA Alpha": str(LORA_ALPHA),
+        },
+        icon="🚀",
+    )
+
+    # Step 1: Loading SAMSum Dataset
+    render_step(1, "Loading SAMSum Dataset & Tokenizer", icon="📋")
+    with status_spinner(f"Loading '{DATASET_ID}' dataset..."):
+        dataset = load_dataset(DATASET_ID)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
+    render_dataset_stats(dataset)
+
+    with status_spinner("Computing sequence length percentiles across splits..."):
+        percentile_stats = compute_length_percentiles(dataset, tokenizer)
+    render_percentiles_table(percentile_stats)
+
+    # Step 2: Tokenizing & Data Collation
+    render_step(2, "Preprocessing & Collating Seq2Seq Batches", icon="⚙️")
+    with status_spinner("Encoding dialogues and target summaries..."):
+        tokenized_dataset = dataset.map(
+            lambda s: preprocess_batch(s, tokenizer),
+            batched=True,
+            remove_columns=["dialogue", "summary", "id"],
+        )
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer,
+        label_pad_token_id=-100,
+        pad_to_multiple_of=8,
+    )
+
+    # Step 3: Initializing PEFT LoRA Model
+    render_step(3, "Configuring LoRA Low-Rank Decomposition Adapters", icon="🧠")
+    with status_spinner(f"Injecting LoRA adapters into '{MODEL_ID}' attention layers..."):
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID)
+        lora_config = create_lora_config()
+        peft_model = get_peft_model(base_model, lora_config)
+
+    trainable_p, total_p = peft_model.get_nb_trainable_parameters()
+    stats = LoRAParamStats(
+        trainable_params=trainable_p,
+        total_params=total_p,
+        trainable_ratio=format_percentage(trainable_p, total_p),
+    )
+    render_param_stats_table(stats)
+
+    # Step 4: Training with Seq2SeqTrainer
+    render_step(4, "Executing PEFT LoRA Training Loop", icon="🏋️")
+    training_args = create_training_args(OUTPUT_DIR)
     trainer = Seq2SeqTrainer(
-        model=model,
+        model=peft_model,
         args=training_args,
         data_collator=data_collator,
         train_dataset=tokenized_dataset["train"],
+        eval_dataset=tokenized_dataset["validation"],
     )
-    model.config.use_cache = False
-    trainer.train()
-    return trainer
 
+    with status_spinner("Training LoRA adapter weights..."):
+        trainer.train()
 
-def save_model(trainer: Seq2SeqTrainer, tokenizer) -> None:
-    """Persist the fine-tuned LoRA model and tokenizer to disk."""
-    trainer.model.save_pretrained(LORA_MODEL_ID)
-    tokenizer.save_pretrained(LORA_MODEL_ID)
-
-
-# ---------------------------------------------------------------------------
-# Inference & evaluation
-# ---------------------------------------------------------------------------
-
-def load_inference_model(lora_model_id: str):
-    """Reload the base model and merge LoRA weights for inference."""
-    config = PeftConfig.from_pretrained(lora_model_id)
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        config.base_model_name_or_path, load_in_8bit=True, device_map={"": 0}
+    save_dir = f"{OUTPUT_DIR}/peft_model_{int(current_time())}"
+    peft_model.save_pretrained(save_dir)
+    tokenizer.save_pretrained(save_dir)
+    render_card(
+        "Checkpoint Saved",
+        f"LoRA adapter weights successfully saved to:\n[text.highlight]{save_dir}[/text.highlight]",
+        icon="💾",
     )
-    tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
-    model = PeftModel.from_pretrained(model, lora_model_id, device_map={"": 0})
-    model.eval()
-    return model, tokenizer
 
+    # Step 5: Sample Inference Preview
+    render_step(5, "Generating Sample Summarization", icon="💬")
+    sample_dialogue = dataset["test"][0]["dialogue"]
+    reference_summary = dataset["test"][0]["summary"]
 
-def run_sample_inference(model, tokenizer, dataset) -> None:
-    """Summarise a random test dialogue and print the result."""
-    sample = dataset["test"][randrange(len(dataset["test"]))]
-    input_ids = tokenizer(
-        sample["dialogue"], return_tensors="pt", truncation=True
-    ).input_ids.cuda()
-    outputs = model.generate(
-        input_ids=input_ids, max_new_tokens=MAX_NEW_TOKENS_INFERENCE,
-        do_sample=True, top_p=TOP_P,
+    prompt = format_dialogue_prompt(sample_dialogue)
+    inputs = tokenizer(prompt, return_tensors="pt").to(peft_model.device)
+    outputs = peft_model.generate(**inputs, max_new_tokens=MAX_TARGET_LENGTH)
+    generated_summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    render_card("Input Dialogue", sample_dialogue, icon="📥")
+    render_card(
+        title="Summarization Comparison",
+        content=(
+            f"[status.success]Model Summary:[/status.success] [text.highlight]{generated_summary}[/text.highlight]\n\n"
+            f"[status.warning]Reference Ground Truth:[/status.warning] [text.main]{reference_summary}[/text.main]"
+        ),
+        icon="✨",
     )
-    print(f"input sentence: {sample['dialogue']}\n{'---' * 20}")
-    print(f"summary:\n{tokenizer.batch_decode(outputs.detach().cpu().numpy(), skip_special_tokens=True)[0]}")
 
+    # Step 6: ROUGE Evaluation
+    render_step(6, "Evaluating ROUGE Linguistic Overlap on Test Split", icon="📊")
+    with status_spinner("Computing ROUGE scores on test set..."):
+        rouge_metric = evaluate.load("rouge")
+        # Run inference on subset for concise evaluation
+        test_subset = dataset["test"].select(range(min(10, len(dataset["test"]))))
+        predictions = []
+        references = []
+        for item in test_subset:
+            p = format_dialogue_prompt(item["dialogue"])
+            inp = tokenizer(p, return_tensors="pt").to(peft_model.device)
+            out = peft_model.generate(**inp, max_new_tokens=MAX_TARGET_LENGTH)
+            predictions.append(tokenizer.decode(out[0], skip_special_tokens=True))
+            references.append(item["summary"])
 
-def evaluate_peft_model(model, tokenizer, sample: dict, max_target_length: int = MAX_EVAL_TARGET_LENGTH) -> tuple[str, str]:
-    """Generate a summary for one tokenized sample and decode both prediction and label."""
-    outputs = model.generate(
-        input_ids=sample["input_ids"].unsqueeze(0).cuda(),
-        do_sample=True,
-        top_p=TOP_P,
-        max_new_tokens=max_target_length,
+        rouge_scores = rouge_metric.compute(predictions=predictions, references=references, use_stemmer=True)
+
+    if rouge_scores:
+        columns = [("ROUGE Metric", STYLE_PRIMARY, "left"), ("F1 Score", STYLE_SUCCESS, "right")]
+        rows = [(k.upper(), f"{v * 100:.2f}%") for k, v in rouge_scores.items()]
+        console.print(create_table("ROUGE Overlap Metrics", columns, rows))
+        pause()
+
+    # Educational Takeaways
+    render_takeaways(
+        points=(
+            (
+                "Why LoRA works",
+                "Over-parameterized models have weight matrices with low 'intrinsic rank'. Adapting only small low-rank matrices A and B captures task-specific changes without catastrophic forgetting.",
+            ),
+            (
+                "Storage & VRAM Savings",
+                "Instead of storing ~1 GB of full model checkpoints per fine-tuned task, a LoRA checkpoint is typically only ~10-20 MB.",
+            ),
+            (
+                "ROUGE Score Metrics",
+                "ROUGE-1/2 scores evaluate vocabulary precision, while ROUGE-L evaluates the Longest Common Subsequence, confirming whether sequential grammatical structures are preserved.",
+            ),
+        ),
     )
-    prediction = tokenizer.decode(outputs[0].detach().cpu().numpy(), skip_special_tokens=True)
-    labels = np.where(sample["labels"] != LABEL_PAD_TOKEN_ID, sample["labels"], tokenizer.pad_token_id)
-    labels = tokenizer.decode(labels, skip_special_tokens=True)
-    return prediction, labels
-
-
-def evaluate_rouge(model, tokenizer) -> None:
-    """Evaluate the fine-tuned model on the saved eval set using ROUGE."""
-    metric = evaluate.load("rouge")
-    test_dataset = load_from_disk(EVAL_DATA_PATH).with_format("torch")
-
-    predictions, references = [], []
-    for sample in tqdm(test_dataset):
-        p, l = evaluate_peft_model(model, tokenizer, sample)
-        predictions.append(p)
-        references.append(l)
-
-    rouge = metric.compute(predictions=predictions, references=references, use_stemmer=True)
-    print(f"Rogue1: {rouge['rouge1'] * 100:2f}%")
-    print(f"rouge2: {rouge['rouge2'] * 100:2f}%")
-    print(f"rougeL: {rouge['rougeL'] * 100:2f}%")
-    print(f"rougeLsum: {rouge['rougeLsum'] * 100:2f}%")
-
-
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    """End-to-end pipeline: data prep → LoRA fine-tuning → inference → ROUGE eval."""
-    _patch_locale()
-
-    dataset = load_raw_dataset()
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-
-    max_source_length, max_target_length = compute_max_lengths(dataset, tokenizer)
-    tokenized_dataset = prepare_tokenized_dataset(dataset, tokenizer, max_source_length, max_target_length)
-
-    model = build_lora_model(MODEL_ID)
-    trainer = fine_tune(model, tokenizer, tokenized_dataset)
-    save_model(trainer, tokenizer)
-
-    inf_model, inf_tokenizer = load_inference_model(LORA_MODEL_ID)
-    run_sample_inference(inf_model, inf_tokenizer, dataset)
-    evaluate_rouge(inf_model, inf_tokenizer)
 
 
 if __name__ == "__main__":

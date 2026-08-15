@@ -1,37 +1,75 @@
-"""
-Benchmarking Different Versions of a Small Language Model Before Deployment on an Endpoint.
+"""Benchmarking Different Versions of a Small Language Model Before Deployment on an Endpoint.
 
-This script is a companion of chapter 11 of the "Domain Specific LLMs in Action" book,
-author Guglielmo Iozzia, Manning Publications, 2024.
+Companion to chapter 11 of "Domain Specific LLMs in Action"
+by Guglielmo Iozzia (Manning Publications, 2024).
 
-The code shows how to benchmark different versions of the GPT-2 small model to assess
-which one would be the most performant and the final candidate for deployment on a
-FastAPI endpoint. The same code applies to any other Open Source LLM hosted in the
-HF Hub by replacing the model id. No hardware acceleration is needed for this model.
-Depending on the model under benchmark a GPU would be required.
-
-More details about the code can be found in the related book's chapter.
+Benchmarks different runtime representations of GPT-2 small (PyTorch CPU, Base ONNX,
+Optimized ONNX, and Optimized FP16) across varying token lengths before FastAPI endpoint deployment.
+Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
-# stdlib
 import gc
+import sys
 import timeit
+from collections.abc import Callable, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-# third-party
+# Ensure root workspace is on pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Third-party
 import numpy as np
 import torch
 from onnxruntime import InferenceSession
 from onnxruntime.transformers.optimizer import optimize_model
 from transformers import BatchEncoding, GPT2Model, GPT2Tokenizer
 
-# Install missing dependencies if needed:
-# !pip install onnxruntime onnx
+# Common functional & UI utilities
+from common.functional import calculate_speedup
+from common.ui import (
+    STYLE_INDEX,
+    STYLE_NUMBER,
+    STYLE_PRIMARY,
+    STYLE_SECONDARY,
+    STYLE_SUCCESS,
+    STYLE_TEXT,
+    STYLE_WARNING,
+    console,
+    create_table,
+    pause,
+    render_banner,
+    render_card,
+    render_step,
+    render_takeaways,
+    status_spinner,
+)
+
 
 # ---------------------------------------------------------------------------
-# Constants
+# Immutable Domain Records & Constants
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class PredeploymentBenchmarkResult:
+    """Benchmark timing for a specific model deployment variant."""
+
+    variant_name: str
+    avg_latency_ms: float
+    speedup_ratio: float
+
+
+@dataclass(frozen=True)
+class SequenceLengthScalingRow:
+    """Latency across variants for a specific input sequence length."""
+
+    sequence_length: int
+    base_onnx_ms: float
+    opt_onnx_ms: float
+    opt_fp16_ms: float
+
+
 DEVICE = "cpu"
 MODEL_ID = "openai-community/gpt2"
 MODEL_SAVE_PATH = Path("gpt2")
@@ -41,156 +79,215 @@ OPTIMIZED_FP16_MODEL_PATH = "optimized_fp16.onnx"
 BENCHMARK_PROMPT = "Today is Saturday and"
 MAX_SEQUENCE_LENGTH = 1024
 ORT_PROVIDERS = ["CPUExecutionProvider"]
-BENCHMARK_SEQUENCE_LENGTHS = [1, 4, 64, 256, 512, 1024]
+BENCHMARK_SEQUENCE_LENGTHS = (1, 4, 64, 256, 512, 1024)
 BENCHMARK_WARMUP_RUNS = 10
 BENCHMARK_TIMED_RUNS = 100
 ONNX_OPSET_VERSION = 18
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Pure Functions & Benchmarking Helpers
 # ---------------------------------------------------------------------------
-
-def benchmark(f, name: str = "") -> None:
-    """Warm up then time *f* over many runs and print average latency in ms."""
+def measure_fn_latency_ms(fn: Callable[[], Any]) -> float:
+    """Pure benchmarking measurement using timeit."""
     for _ in range(BENCHMARK_WARMUP_RUNS):
-        f()
-    seconds_per_iter = timeit.timeit(f, number=BENCHMARK_TIMED_RUNS) / BENCHMARK_TIMED_RUNS
-    print(f"{name}: {seconds_per_iter * 1000:.3f} ms")
-
-
-def load_model(model_id: str, device: str) -> tuple[GPT2Tokenizer, GPT2Model]:
-    """Load the vanilla GPT-2 small model and tokenizer from the HF Hub."""
-    tokenizer = GPT2Tokenizer.from_pretrained(model_id)
-    model = GPT2Model.from_pretrained(model_id)
-    model.eval()
-    model.save_pretrained(MODEL_SAVE_PATH)
-    return tokenizer, model
-
-
-def export_to_onnx(model: GPT2Model, tokenizer: GPT2Tokenizer, text: str, path: str) -> None:
-    """Convert the vanilla model to ONNX format."""
-    input_ids: BatchEncoding = tokenizer(
-        text, add_special_tokens=True, return_attention_mask=False, return_tensors="pt"
-    )
-    for k, v in input_ids.items():
-        input_ids[k] = v.type(dtype=torch.int32)
-    input_tensor = input_ids["input_ids"]
-
-    dynamic_axes = {
-        "input_ids": {0: "batch_size", 1: "sequence_length"},
-        "logits": {0: "batch_size", 1: "sequence_length"},
-    }
-    torch.onnx.export(
-        model,
-        f=path,
-        args=(input_tensor,),
-        input_names=["input_ids"],
-        output_names=["logits"],
-        quantization=False,
-        var_output_seq=True,
-        do_constant_folding=True,
-        opset_version=ONNX_OPSET_VERSION,
-        dynamic_axes=dynamic_axes,
-    )
-
-
-def build_ort_inputs(tokenizer: GPT2Tokenizer, text: str) -> dict:
-    """Encode *text* into ORT-ready int32 numpy inputs."""
-    encodings_dict = tokenizer.batch_encode_plus([text])
-    input_ids = torch.tensor(encodings_dict["input_ids"], dtype=torch.int32)
-    return {"input_ids": input_ids.cpu().numpy()}
-
-
-def run_sequence_length_benchmarks(
-    tokenizer: GPT2Tokenizer,
-    sess: InferenceSession,
-    optimized_sess: InferenceSession,
-    optimized_fp16_sess: InferenceSession,
-) -> None:
-    """Run latency benchmarks for each model variant across several token counts."""
-    tokenizer.pad_token = tokenizer.eos_token
-    for n in BENCHMARK_SEQUENCE_LENGTHS:
-        print(f"====== Tokens {n} ======")
-        txt = " ".join(["word"] * n)
-
-        ort_inputs = dict(
-            tokenizer(
-                txt,
-                max_length=MAX_SEQUENCE_LENGTH,
-                return_tensors="np",
-                return_attention_mask=False,
-            )
-        )
-        ort_inputs["input_ids"] = ort_inputs["input_ids"].astype(np.int32)
-
-        benchmark(
-            lambda: sess.run(None, {"input_ids": ort_inputs["input_ids"]}),
-            f"ONNX ({n} tokens)",
-        )
-        benchmark(lambda: optimized_sess.run(None, ort_inputs), f"ONNX optimized ({n} tokens)")
-        benchmark(
-            lambda: optimized_fp16_sess.run(None, ort_inputs),
-            f"ONNX optimized fp16 ({n} tokens)",
-        )
+        fn()
+    seconds_per_iter = timeit.timeit(fn, number=BENCHMARK_TIMED_RUNS) / BENCHMARK_TIMED_RUNS
+    return float(seconds_per_iter * 1000.0)
 
 
 # ---------------------------------------------------------------------------
-# Main
+# View / Rendering Functions
 # ---------------------------------------------------------------------------
+def render_summary_table(results: Sequence[PredeploymentBenchmarkResult]) -> None:
+    """Render single prompt candidate latency table."""
+    columns = [
+        ("Deployment Candidate", STYLE_PRIMARY, "left"),
+        ("Average Latency (ms)", STYLE_WARNING, "right"),
+        ("Speedup vs PyTorch", STYLE_SUCCESS, "right"),
+    ]
+    rows = [(r.variant_name, f"{r.avg_latency_ms:.3f} ms", f"{r.speedup_ratio:.2f}x") for r in results]
+    console.print(create_table("Pre-Deployment Candidate Latency Comparison", columns, rows))
+    pause()
 
+
+def render_scaling_table(rows_data: Sequence[SequenceLengthScalingRow]) -> None:
+    """Render sequence length latency scaling table."""
+    columns = [
+        ("Sequence Length", STYLE_PRIMARY, "center"),
+        ("Base ONNX (ms)", STYLE_TEXT, "right"),
+        ("Optimized ONNX (ms)", STYLE_WARNING, "right"),
+        ("Optimized FP16 (ms)", STYLE_SUCCESS, "right"),
+    ]
+    rows = [
+        (
+            f"{r.sequence_length} tokens",
+            f"{r.base_onnx_ms:.2f} ms",
+            f"{r.opt_onnx_ms:.2f} ms",
+            f"{r.opt_fp16_ms:.2f} ms",
+        )
+        for r in rows_data
+    ]
+    console.print(create_table("Latency Scaling by Sequence Length (ms)", columns, rows))
+    pause()
+
+
+# ---------------------------------------------------------------------------
+# Main Pipeline
+# ---------------------------------------------------------------------------
 def main() -> None:
-    """Orchestrate loading, exporting, optimising and benchmarking GPT-2."""
-    # Load vanilla model
-    tokenizer, model = load_model(MODEL_ID, DEVICE)
-    num_layer = model.config.n_layer
-    num_attention_heads = model.config.n_head
-    hidden_size = model.config.n_embd
+    """Execute pre-deployment model benchmarking pipeline."""
+    render_banner(
+        title="Benchmarking SLM Deployments: PyTorch vs ONNX vs FP16",
+        subtitle="Chapter 11: Domain-Specific Small Language Models",
+        metadata={
+            "Model": MODEL_ID,
+            "Target Endpoint": "FastAPI Microservice",
+            "Timed Iterations": str(BENCHMARK_TIMED_RUNS),
+        },
+        icon="🚀",
+    )
 
-    # Tokenize prompt and benchmark vanilla PyTorch model
+    # Step 1: PyTorch CPU Baseline Benchmark
+    render_step(1, "Loading Model & PyTorch CPU Baseline Benchmark", icon="📋")
+    with status_spinner(f"Loading '{MODEL_ID}'..."):
+        tokenizer = GPT2Tokenizer.from_pretrained(MODEL_ID)
+        model: GPT2Model = GPT2Model.from_pretrained(MODEL_ID)
+        model.eval()
+        model.save_pretrained(MODEL_SAVE_PATH)
+
     inputs_base = tokenizer(BENCHMARK_PROMPT, return_tensors="pt").to(DEVICE)
-    benchmark(lambda: model(**inputs_base), "PyTorch")
+    pt_ms = measure_fn_latency_ms(lambda m=model, inp=inputs_base: m(**inp))
+    render_card("PyTorch Baseline", f"PyTorch CPU Latency: [brand.secondary]{pt_ms:.3f} ms[/brand.secondary]", icon="✔")
 
-    # Export to ONNX
-    export_to_onnx(model, tokenizer, BENCHMARK_PROMPT, ONNX_MODEL_PATH)
+    # Step 2: Exporting PyTorch to ONNX Graph
+    render_step(2, "Exporting Static Computation Graph to ONNX", icon="⚙️")
+    input_ids = tokenizer(BENCHMARK_PROMPT, add_special_tokens=True, return_attention_mask=False, return_tensors="pt")
+    input_tensor = input_ids["input_ids"].type(torch.int32)
 
-    # Free vanilla model; no longer needed
+    with status_spinner("Tracing computation graph..."):
+        torch.onnx.export(
+            model,
+            f=ONNX_MODEL_PATH,
+            args=(input_tensor,),
+            input_names=["input_ids"],
+            output_names=["logits"],
+            quantization=False,
+            var_output_seq=True,
+            do_constant_folding=True,
+            opset_version=ONNX_OPSET_VERSION,
+            dynamic_axes={
+                "input_ids": {0: "batch_size", 1: "sequence_length"},
+                "logits": {0: "batch_size", 1: "sequence_length"},
+            },
+        )
+    render_card("ONNX Export", f"Saved to [text.highlight]{ONNX_MODEL_PATH}[/text.highlight]", icon="💾")
     del model
     gc.collect()
 
-    # Benchmark base ONNX model
+    # Step 3: Base ONNX Model Benchmark
+    render_step(3, "Benchmarking Base ONNX Session", icon="⏱️")
     sess = InferenceSession(ONNX_MODEL_PATH, providers=ORT_PROVIDERS)
-    ort_inputs = build_ort_inputs(tokenizer, BENCHMARK_PROMPT)
-    benchmark(lambda: sess.run(None, ort_inputs), "ONNX")
+    encodings_dict = tokenizer.batch_encode_plus([BENCHMARK_PROMPT])
+    ort_input_ids = torch.tensor(encodings_dict["input_ids"], dtype=torch.int32).cpu().numpy()
+    ort_inputs = {"input_ids": ort_input_ids}
 
+    base_onnx_ms = measure_fn_latency_ms(lambda: sess.run(None, ort_inputs))
+    render_card(
+        "Base ONNX", f"Base ONNX CPU Latency: [brand.secondary]{base_onnx_ms:.3f} ms[/brand.secondary]", icon="✔"
+    )
     del sess
     gc.collect()
 
-    # Optimise the ONNX model
-    optimized_model = optimize_model(input=ONNX_MODEL_PATH, model_type="gpt2", use_gpu=False)
-    optimized_model.save_model_to_file(OPTIMIZED_ONNX_PATH)
+    # Step 4: ONNX Graph Optimization
+    render_step(4, "Fusing Transformer Attention Kernels", icon="⚡")
+    with status_spinner("Applying graph-level operator fusion..."):
+        optimized_model = optimize_model(input=ONNX_MODEL_PATH, model_type="gpt2", use_gpu=False)
+        optimized_model.save_model_to_file(OPTIMIZED_ONNX_PATH)
 
     optimized_sess = InferenceSession(OPTIMIZED_ONNX_PATH, providers=ORT_PROVIDERS)
-    benchmark(lambda: optimized_sess.run(None, input_feed=ort_inputs), "ONNX optimized")
-
+    opt_onnx_ms = measure_fn_latency_ms(lambda: optimized_sess.run(None, input_feed=ort_inputs))
+    render_card(
+        "Optimized ONNX",
+        f"Optimized ONNX CPU Latency: [brand.secondary]{opt_onnx_ms:.3f} ms[/brand.secondary]",
+        icon="✔",
+    )
     del optimized_sess
     gc.collect()
 
-    # Downsize optimised ONNX model to FP16
-    optimized_fp16_model = deepcopy(optimized_model)
-    optimized_fp16_model.convert_float_to_float16()
-    optimized_fp16_model.save_model_to_file(OPTIMIZED_FP16_MODEL_PATH)
+    # Step 5: FP16 Quantized ONNX Model
+    render_step(5, "Downcasting to FP16 Precision", icon="✨")
+    with status_spinner("Converting optimized ONNX model to FP16..."):
+        optimized_fp16_model = deepcopy(optimized_model)
+        optimized_fp16_model.convert_float_to_float16()
+        optimized_fp16_model.save_model_to_file(OPTIMIZED_FP16_MODEL_PATH)
 
     del optimized_model
     gc.collect()
 
     optimized_fp16_sess = InferenceSession(OPTIMIZED_FP16_MODEL_PATH, providers=ORT_PROVIDERS)
-    benchmark(lambda: optimized_fp16_sess.run(None, input_feed=ort_inputs), "ONNX optimized fp16")
+    opt_fp16_ms = measure_fn_latency_ms(lambda: optimized_fp16_sess.run(None, input_feed=ort_inputs))
 
-    # Multi-length benchmark across all variants
+    summary_results = (
+        PredeploymentBenchmarkResult("PyTorch CPU Baseline", pt_ms, 1.0),
+        PredeploymentBenchmarkResult("Base ONNX CPU", base_onnx_ms, calculate_speedup(pt_ms, base_onnx_ms)),
+        PredeploymentBenchmarkResult("Optimized ONNX CPU", opt_onnx_ms, calculate_speedup(pt_ms, opt_onnx_ms)),
+        PredeploymentBenchmarkResult("Optimized FP16 ONNX CPU", opt_fp16_ms, calculate_speedup(pt_ms, opt_fp16_ms)),
+    )
+    render_summary_table(summary_results)
+
+    # Step 6: Sequence Length Scaling Comparison
+    render_step(6, "Evaluating Latency Scaling by Input Token Length", icon="📊")
+    tokenizer.pad_token = tokenizer.eos_token
     sess = InferenceSession(ONNX_MODEL_PATH, providers=ORT_PROVIDERS)
     optimized_sess = InferenceSession(OPTIMIZED_ONNX_PATH, providers=ORT_PROVIDERS)
-    run_sequence_length_benchmarks(tokenizer, sess, optimized_sess, optimized_fp16_sess)
+
+    scaling_rows: list[SequenceLengthScalingRow] = []
+    with status_spinner("Testing sequence lengths from 1 to 1024 tokens..."):
+        for n in BENCHMARK_SEQUENCE_LENGTHS:
+            txt = " ".join(["word"] * n)
+            encoded = dict(
+                tokenizer(
+                    txt,
+                    max_length=MAX_SEQUENCE_LENGTH,
+                    return_tensors="np",
+                    return_attention_mask=False,
+                )
+            )
+            encoded["input_ids"] = encoded["input_ids"].astype(np.int32)
+
+            t_base = measure_fn_latency_ms(lambda inp=encoded: sess.run(None, {"input_ids": inp["input_ids"]}))
+            t_opt = measure_fn_latency_ms(lambda inp=encoded: optimized_sess.run(None, inp))
+            t_fp16 = measure_fn_latency_ms(lambda inp=encoded: optimized_fp16_sess.run(None, inp))
+
+            scaling_rows.append(
+                SequenceLengthScalingRow(
+                    sequence_length=n,
+                    base_onnx_ms=t_base,
+                    opt_onnx_ms=t_opt,
+                    opt_fp16_ms=t_fp16,
+                )
+            )
+
+    render_scaling_table(scaling_rows)
+
+    # Educational Takeaways
+    render_takeaways(
+        points=(
+            (
+                "Pre-Deployment Latency Profiling",
+                "Benchmarking across varying sequence lengths (16 to 1024 tokens) reveals scaling characteristics before production rollout.",
+            ),
+            (
+                "ONNX CPU Acceleration",
+                "Graph fusion combined with dynamic FP16/INT8 conversion provides consistent 2x-3x speedups on standard server CPUs.",
+            ),
+            (
+                "Memory-Bound Attention",
+                "As sequence length grows, attention memory traffic scales quadratically without KV-caching or optimized fused attention kernels.",
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":

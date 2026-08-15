@@ -31,16 +31,36 @@ import signal
 import sys
 import tempfile
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Dict, Iterable, List, Optional, Union
+from pathlib import Path
+from typing import Dict, List, Optional, Union
+
+# Ensure root workspace is on pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import fire
 import numpy as np
 import torch
 import tqdm
 from human_eval.data import HUMAN_EVAL, read_problems, stream_jsonl, write_jsonl
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from tqdm import tqdm as tqdm_progress
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+
+from common.ui import (
+    STYLE_PRIMARY,
+    STYLE_SUCCESS,
+    STYLE_TEXT,
+    STYLE_WARNING,
+    console,
+    create_table,
+    pause,
+    render_banner,
+    render_card,
+    render_step,
+    render_takeaways,
+    status_spinner,
+)
 
 # Model and file path constants
 MODEL_ID = "Salesforce/codegen-350M-mono"
@@ -64,25 +84,26 @@ CODE_GENERATION_LANGUAGE = "python"
 
 # ---- Data loading utilities ----
 
-def read_problems_local(eval_file: str) -> Dict[str, dict]:
+
+def read_problems_local(eval_file: str) -> dict[str, dict]:
     """Load problems from a JSONL file, keyed by task_id."""
     return {str(task["task_id"]): task for task in stream_jsonl_local(eval_file)}
 
 
 def stream_jsonl_local(filename: str):
     """Yield non-empty lines from a JSONL file as parsed dicts."""
-    with open(filename, "r") as fp:
+    with open(filename) as fp:
         for line in fp:
             if any(not x.isspace() for x in line):
                 yield json.loads(line)
 
 
-def count_files_present_nonempty(list_fname: List[str]):
+def count_files_present_nonempty(list_fname: list[str]):
     """Return (count_of_nonempty_existing_files, total_expected) for a list of paths."""
     count = 0
     for fname in list_fname:
         if os.path.isfile(fname):
-            with open(fname, "r", encoding="utf8") as f:
+            with open(fname, encoding="utf8") as f:
                 s = f.read()
             if s != "":
                 count += 1
@@ -90,6 +111,7 @@ def count_files_present_nonempty(list_fname: List[str]):
 
 
 # ---- Token position utilities ----
+
 
 def get_token_position_by_string(
     target_str: str,
@@ -107,26 +129,14 @@ def get_token_position_by_string(
         if gen_str.rstrip() == target_str.rstrip():
             return position  # not including outputs[position]
         if gen_str.startswith(target_str) and target_str != "":
-            print("Cannot find an exact match, use approx!")
-            print(f"output length: {len(outputs)}")
-            print(target_str)
-            print("-----------------------")
-            print(gen_str)
             return position
     if target_str.rstrip() == "":
-        if target_str == "":
-            print("generated empty string!")
-        else:
-            print("generated only white space!")
         return 0
-    print(f"output length: {len(outputs)}")
-    print(target_str)
-    print("-----------------------")
-    print(gen_str)
     raise RuntimeError("Cannot match prefix returned by AST.")
 
 
 # ---- AST-based code validation ----
+
 
 def is_valid_python(code: str):
     """Parse code with the ast module; return parsed AST or False on failure."""
@@ -135,8 +145,7 @@ def is_valid_python(code: str):
             parsed_code = ast.parse(code)
         except SyntaxError:
             return False
-    except Exception as e:
-        print("Exception: ", e)
+    except Exception:
         return False
     return parsed_code
 
@@ -161,6 +170,7 @@ def get_function_from_ast(parsed_code, code: str, option: str = "func_ast_last")
 
 # ---- Code generation filtering ----
 
+
 def filter_valid_code(
     true_str_input: str,
     execution_prompt,
@@ -178,15 +188,8 @@ def filter_valid_code(
 ):
     """
     Decode generated sequences and filter for valid Python code.
-
-    Due to tokenizer non lossless-ness, the decoded original prompt and
-    the real original prompt are not the same.
-
-    Due to constrained generation, input tokens not not necessarily match
-    with the new input tokens (but match by characters instead).
     """
     samples = []
-    # need both to handle CG / non losslessness of tokenizer
     decoded_context_string = tokenizer.batch_decode(
         inputs[:, use_language_tag:initial_context_length],
         skip_special_tokens=skip_special_tokens,
@@ -198,8 +201,6 @@ def filter_valid_code(
         clean_up_tokenization_spaces=False,
     )[0]
     processed_prompt = decoded_context_string
-
-    assert execution_prompt is None, "only support execution_prompt is None here"
     processed_execution_prompt = processed_prompt
 
     output_lists = sequences[:, initial_context_length:]
@@ -213,9 +214,7 @@ def filter_valid_code(
                 clean_up_tokenization_spaces=False,
             )
             origin_pred = gen_up_to_pos_str
-            code = (
-                processed_execution_prompt + gen_up_to_pos_str
-            )  # something is off for python
+            code = processed_execution_prompt + gen_up_to_pos_str
             parsed_code = is_valid_python(code)
             if parsed_code:
                 is_valid = True
@@ -226,11 +225,8 @@ def filter_valid_code(
                             code,
                             option=post_process,
                         )
-                        generated_part = function_segment_plus_previous[
-                            len(processed_execution_prompt) :
-                        ]
-                    except Exception as e:
-                        print("Something went wrong...", e)
+                        generated_part = function_segment_plus_previous[len(processed_execution_prompt) :]
+                    except Exception:
                         generated_part = gen_up_to_pos_str
                 elif post_process == "greedy":
                     generated_part = gen_up_to_pos_str
@@ -257,12 +253,8 @@ def filter_valid_code(
                 samples.append(
                     dict(
                         task_id=task_id,
-                        completion=(processed_prompt + generated_part)[
-                            len(decoded_original_prompt) :
-                        ],
-                        ori_pred=(processed_prompt + origin_pred)[
-                            len(decoded_original_prompt) :
-                        ],
+                        completion=(processed_prompt + generated_part)[len(decoded_original_prompt) :],
+                        ori_pred=(processed_prompt + origin_pred)[len(decoded_original_prompt) :],
                         input=true_str_input,
                         mean_logp=score,
                     )
@@ -275,18 +267,13 @@ def filter_valid_code(
                 clean_up_tokenization_spaces=False,
             )
             origin_pred = predictions
-            print("Warning - no valid substring")
             if task_id is None:
                 return predictions
             samples.append(
                 dict(
                     task_id=task_id,
-                    completion=(processed_prompt + predictions)[
-                        len(decoded_original_prompt) :
-                    ],
-                    ori_pred=(processed_prompt + origin_pred)[
-                        len(decoded_original_prompt) :
-                    ],
+                    completion=(processed_prompt + predictions)[len(decoded_original_prompt) :],
+                    ori_pred=(processed_prompt + origin_pred)[len(decoded_original_prompt) :],
                     input=true_str_input,
                     mean_logp=-1e8,
                 )
@@ -297,36 +284,30 @@ def filter_valid_code(
 
 # ---- HumanEval correctness evaluation ----
 
+
 def custom_check_correctness(
-    problem: Dict,
+    problem: dict,
     completion: str,
     timeout: float,
-    completion_id: Optional[int] = None,
-) -> Dict:
+    completion_id: int | None = None,
+) -> dict:
     """
     Evaluate functional correctness of a completion by running its test suite.
-
-    :param completion_id: an optional completion ID so we can match
-        the results later even if execution finishes asynchronously.
     """
 
     def unsafe_execute():
         with create_tempdir():
-            # These system calls are needed when cleaning up tempdir.
             import os
             import shutil
+
             rmtree = shutil.rmtree
             rmdir = os.rmdir
             chdir = os.chdir
 
-            # Disable functionalities that can make destructive changes to the test.
             reliability_guard()
 
-            # Construct the check program and run it.
             check_program = (
-                problem["prompt"] + completion + "\n" +
-                problem["test"] + "\n" +
-                f"check({problem['entry_point']})"
+                problem["prompt"] + completion + "\n" + problem["test"] + "\n" + f"check({problem['entry_point']})"
             )
 
             try:
@@ -340,7 +321,6 @@ def custom_check_correctness(
             except BaseException as e:
                 result.append(f"failed: {e}")
 
-            # Needed for cleaning up.
             shutil.rmtree = rmtree
             os.rmdir = rmdir
             os.chdir = chdir
@@ -368,8 +348,10 @@ def custom_check_correctness(
 @contextlib.contextmanager
 def time_limit(seconds: float):
     """Context manager that raises TimeoutException after *seconds*."""
+
     def signal_handler(signum, frame):
         raise TimeoutException("Timed out!")
+
     signal.setitimer(signal.ITIMER_REAL, seconds)
     signal.signal(signal.SIGALRM, signal_handler)
     try:
@@ -401,19 +383,16 @@ class TimeoutException(Exception):
 
 
 class WriteOnlyStringIO(io.StringIO):
-    """StringIO that throws an exception when it's read from."""
-
     def read(self, *args, **kwargs):
-        raise IOError
+        raise OSError
 
     def readline(self, *args, **kwargs):
-        raise IOError
+        raise OSError
 
     def readlines(self, *args, **kwargs):
-        raise IOError
+        raise OSError
 
-    def readable(self, *args, **kwargs):
-        """Returns True if the IO object can be read."""
+    def readable(self):
         return False
 
 
@@ -423,7 +402,6 @@ class redirect_stdin(contextlib._RedirectStream):  # type: ignore
 
 @contextlib.contextmanager
 def chdir(root: str):
-    """Context manager to temporarily change the working directory."""
     if root == ".":
         yield
         return
@@ -437,20 +415,10 @@ def chdir(root: str):
         os.chdir(cwd)
 
 
-def reliability_guard(maximum_memory_bytes: Optional[int] = None) -> None:
-    """
-    Disable various destructive functions and prevent generated code from
-    interfering with the test (e.g. fork bomb, killing other processes,
-    removing filesystem files, etc.)
-
-    WARNING
-    This function is NOT a security sandbox. Untrusted code, including, model-
-    generated code, should not be blindly executed outside of one. See the
-    Codex paper for more information about OpenAI's code sandbox, and proceed
-    with caution.
-    """
+def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     if maximum_memory_bytes is not None:
         import resource
+
         resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
         resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
         if not platform.uname().system == "Darwin":
@@ -459,10 +427,12 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None) -> None:
     faulthandler.disable()
 
     import builtins
+
     builtins.exit = None
     builtins.quit = None
 
     import os
+
     os.environ["OMP_NUM_THREADS"] = "1"
 
     os.kill = None
@@ -494,16 +464,17 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None) -> None:
     os.chdir = None
 
     import shutil
+
     shutil.rmtree = None
     shutil.move = None
     shutil.chown = None
 
     import subprocess
+
     subprocess.Popen = None  # type: ignore
 
     __builtins__["help"] = None
 
-    import sys
     sys.modules["ipdb"] = None
     sys.modules["joblib"] = None
     sys.modules["resource"] = None
@@ -513,15 +484,15 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None) -> None:
 
 # ---- pass@k estimation ----
 
+
 def estimate_pass_at_k(
-    num_samples: Union[int, List[int], np.ndarray],
-    num_correct: Union[List[int], np.ndarray],
+    num_samples: int | list[int] | np.ndarray,
+    num_correct: list[int] | np.ndarray,
     k: int,
 ) -> np.ndarray:
     """Estimate pass@k of each problem and return them in an array."""
 
     def estimator(n: int, c: int, k: int) -> float:
-        """Calculate 1 - comb(n - c, k) / comb(n, k)."""
         if n - c < k:
             return 1.0
         return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
@@ -537,25 +508,24 @@ def estimate_pass_at_k(
 
 def custom_evaluate_functional_correctness(
     sample_file: str,
-    k: List[int] = [1, 10, 100],
+    k: list[int] = [1, 10, 100],
     n_workers: int = 4,
     timeout: float = 3.0,
     problem_file: str = HUMAN_EVAL,
-) -> Dict:
+) -> dict:
     """
     Evaluate functional correctness of generated samples and write results
     to f"{sample_file}_results.jsonl".
     """
     problems = read_problems(problem_file)
 
-    # Check the generated samples against test suites.
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = []
         completion_id = Counter()
         n_samples = 0
         results = defaultdict(list)
 
-        print("Reading samples...")
+        console.print("[cyan]Submitting test suites for evaluation...[/cyan]")
         for sample in tqdm.tqdm(stream_jsonl(sample_file)):
             task_id = sample["task_id"]
             completion = sample["completion"]
@@ -567,12 +537,10 @@ def custom_evaluate_functional_correctness(
 
         assert len(completion_id) == len(problems), "Some problems are not attempted."
 
-        print("Running test suites...")
-        for future in tqdm.tqdm(as_completed(futures), total=len(futures)):
+        for future in tqdm.tqdm(as_completed(futures), total=len(futures), desc="Executing unit tests"):
             result = future.result()
             results[result["task_id"]].append((result["completion_id"], result))
 
-    # Calculate pass@k.
     total, correct = [], []
     for result in results.values():
         result.sort()
@@ -582,14 +550,10 @@ def custom_evaluate_functional_correctness(
     total = np.array(total)
     correct = np.array(correct)
 
-    ks = k
     pass_at_k = {
-        f"pass@{k}": estimate_pass_at_k(total, correct, k).mean()
-        for k in ks
-        if (total >= k).all()
+        f"pass@{k_val}": estimate_pass_at_k(total, correct, k_val).mean() for k_val in k if (total >= k_val).all()
     }
 
-    # Save the results in one file.
     def combine_results():
         for sample in stream_jsonl(sample_file):
             task_id = sample["task_id"]
@@ -599,19 +563,21 @@ def custom_evaluate_functional_correctness(
             yield sample
 
     out_file = sample_file + "_results.jsonl"
-    print(f"Writing results to {out_file}...")
-    write_jsonl(out_file, tqdm.tqdm(combine_results(), total=n_samples))
-
+    write_jsonl(out_file, combine_results())
+    console.print(f"[bold green]✔[/bold green] Results written to [yellow]{out_file}[/yellow]")
     return pass_at_k
 
 
 # ---- Code generation pipeline ----
 
+
 def load_model_and_tokenizer(model_id: str, device: str):
     """Load the causal LM and its tokenizer from the HF Hub onto *device*."""
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(model_id).to(device)
-    model.eval()
+    with console.status(f"[bold green]Loading {model_id} onto {device}..."):
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(model_id).to(device)
+        model.eval()
+    console.print("[bold green]✔[/bold green] CodeGen model loaded.")
     return model, tokenizer
 
 
@@ -631,39 +597,24 @@ def build_generation_config() -> GenerationConfig:
 def generate_code_samples(
     model,
     tokenizer,
-    problems: Dict,
+    problems: dict,
     device: str,
     num_samples: int = NUM_SAMPLES,
     batch_size: int = BATCH_SIZE,
     override_previous_results: bool = False,
 ) -> None:
-    """
-    Iterate over HumanEval prompts and write generated code samples to disk.
-
-    Each generated sample is saved as a JSON file under OUTPUT_DIR/output/.
-    Skips tasks that already have all samples generated (result-caching mode).
-    """
+    """Iterate over HumanEval prompts and write generated code samples to disk."""
     os.makedirs(os.path.join(OUTPUT_DIR, "output"), exist_ok=True)
     generation_config = build_generation_config()
     execution_prompt = None
 
-    for enum_idx, task_id in enumerate(tqdm_progress(problems)):
-        # assume TaskName/ID format; the ID part need not be an integer
+    for enum_idx, task_id in enumerate(tqdm_progress(problems, desc="Generating HumanEval completions")):
         task_idx = task_id.split("/")[1]
         if not override_previous_results:
-            fnames = [
-                FPATH_FORMAT.format(task_idx=task_idx, completion_idx=_idx)
-                for _idx in range(num_samples)
-            ]
+            fnames = [FPATH_FORMAT.format(task_idx=task_idx, completion_idx=_idx) for _idx in range(num_samples)]
             count, all_count = count_files_present_nonempty(fnames)
             if count == all_count:
-                print(f"Result caching mode: Skipping case {task_id}. Generated all {all_count}")
                 continue
-            else:
-                print(
-                    f"Result caching mode: Only {count} out of {all_count} were generated. "
-                    f"Regenerating task {task_id}"
-                )
 
         prompt = problems[task_id]["prompt"]
         completion_idx = -1
@@ -690,15 +641,14 @@ def generate_code_samples(
 
             for prediction in predictions_post_eos:
                 completion_idx += 1
-                fpath = FPATH_FORMAT.format(
-                    task_idx=task_idx, completion_idx=completion_idx
-                )
+                fpath = FPATH_FORMAT.format(task_idx=task_idx, completion_idx=completion_idx)
                 prediction["language"] = CODE_GENERATION_LANGUAGE
                 with open(fpath, "w", encoding="utf8") as _f:
                     json.dump(prediction, _f)
 
 
 # ---- Entry point (fire-compatible) ----
+
 
 def entry_point(
     sample_dir: str = DEFAULT_SAMPLE_DIR,
@@ -707,52 +657,79 @@ def entry_point(
     timeout: float = DEFAULT_TIMEOUT,
     problem_file: str = DEFAULT_PROBLEM_FILE,
 ) -> None:
-    """
-    Evaluate functional correctness of generated samples and write results
-    to f"{sample_file}_results.jsonl".
-    """
+    """Evaluate functional correctness of generated samples."""
     k_list = list(map(int, k.split(",")))
 
-    # Collect all generated sample files
     sample_files = glob.glob(os.path.join(sample_dir, "*.json"))
-
-    # Read samples from all generated files and combine into a list
     samples = []
     for sample_file in sample_files:
-        with open(sample_file, "r", encoding="utf8") as f:
+        with open(sample_file, encoding="utf8") as f:
             try:
                 samples.append(json.load(f))
             except json.JSONDecodeError:
-                print(f"Error decoding JSON from {sample_file}")
                 continue
 
-    # Write combined samples to a temporary JSONL file for the evaluation function.
-    # In a real scenario, you might want to process the samples directly
-    # without writing to an intermediate file.
     with open(TEMP_SAMPLES_FILE, "w", encoding="utf8") as f:
         for sample in samples:
             json.dump(sample, f)
             f.write("\n")
 
-    results = custom_evaluate_functional_correctness(
-        TEMP_SAMPLES_FILE, k_list, n_workers, timeout, problem_file
-    )
-    print(results)
+    results = custom_evaluate_functional_correctness(TEMP_SAMPLES_FILE, k_list, n_workers, timeout, problem_file)
 
-    # Clean up the temporary file
-    os.remove(TEMP_SAMPLES_FILE)
+    columns = [("Metric", STYLE_PRIMARY, "left"), ("pass@k Score", STYLE_SUCCESS, "right")]
+    rows = [(metric, f"{score * 100:.2f}%") for metric, score in results.items()]
+    console.print(create_table("HumanEval pass@k Evaluation Metrics", columns, rows))
+    pause()
+
+    if os.path.exists(TEMP_SAMPLES_FILE):
+        os.remove(TEMP_SAMPLES_FILE)
 
 
 def main() -> None:
     """Orchestrate model loading, code generation, and correctness evaluation."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, tokenizer = load_model_and_tokenizer(MODEL_ID, device)
+    render_banner(
+        title="ReCode Evaluation of CodeGen 350M on HumanEval",
+        subtitle="Chapter 7: Domain-Specific Small Language Models",
+        metadata={
+            "Model": MODEL_ID,
+            "Problems File": PROBLEMS_FILE_PATH,
+            "Target Language": CODE_GENERATION_LANGUAGE.capitalize(),
+        },
+        icon="🚀",
+    )
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    render_step(1, "Loading Model and HumanEval Problem Set", icon="📋")
+    model, tokenizer = load_model_and_tokenizer(MODEL_ID, device)
     problems = read_problems_local(PROBLEMS_FILE_PATH)
+    render_card(
+        "Problems Loaded",
+        f"Successfully loaded [text.highlight]{len(problems)}[/text.highlight] HumanEval coding challenges.",
+        icon="✔",
+    )
+
+    render_step(2, "Generating Code Samples & Performing AST Filtering", icon="⚙️")
     generate_code_samples(model, tokenizer, problems, device)
 
-    # Run correctness evaluation via fire CLI
+    render_step(3, "Evaluating Functional Correctness via Fire CLI", icon="📊")
     fire.Fire(entry_point)
+
+    render_takeaways(
+        points=(
+            (
+                "ReCode AST Parsing",
+                "Validates generated code using Python's ast.parse to extract complete function definitions and discard syntax-broken completions.",
+            ),
+            (
+                "pass@k Estimation",
+                "Evaluates the probability that at least one of k generated candidates passes all unit test assertions without requiring combinatorial explosions.",
+            ),
+            (
+                "Sandboxed Test Execution",
+                "Runs student/model code in isolated sub-processes with strict CPU and memory limits to prevent infinite loops or security escapes.",
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":

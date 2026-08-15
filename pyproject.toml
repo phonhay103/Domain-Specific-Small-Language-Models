@@ -1,7 +1,7 @@
 [project]
 name = "Domain-Specific-Small-Language-Models"
 version = "0.1.0"
-description = "Add your description here"
+description = "Domain-Specific Small Language Models - Hands-on implementations, optimizations, and benchmarks"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -35,6 +35,7 @@ dependencies = [
     "pypdf2>=3.0.1",
     "rank-bm25>=0.2.2",
     "requests>=2.34.2",
+    "rich>=15.0.0",
     "scikit-learn>=1.9.0",
     "sentence-transformers>=5.7.0",
     "sentencepiece>=0.2.2",
@@ -46,4 +47,69 @@ dependencies = [
     "transformers>=5.15.0",
     "trl>=1.10.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+    "ty>=0.0.72",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+    "ARG",   # flake8-unused-arguments
+    "SIM",   # flake8-simplify
+    "RUF",   # Ruff specific rules
+]
+ignore = [
+    "E501",   # Line length limit handled by ruff format
+    "ARG001", # Unused function arguments (callbacks/reward functions)
+    "ARG002", # Unused method arguments
+    "SIM117", # Allow nested with statements for status & torch context managers
+    "SIM108", # Use ternary operator instead of if-else-block
+    "SIM113", # Allow manual index tracking
+    "SIM116", # Allow if/elif chains for prompt selection
+    "SIM201", # Allow not == comparison
+    "B008",   # Do not perform function call in argument defaults
+    "B006",   # Mutable default args in eval configs
+    "B007",   # Loop variable not used in some loop bodies
+    "B011",   # Allow assert False in AST matchers
+    "B905",   # zip without explicit strict=
+    "C408",   # Allow dict() constructor
+    "E721",   # Direct type comparisons
+    "E731",   # Allow lambda assignments
+    "E741",   # Allow single-letter loop/comprehension variable names
+    "RUF001", # Allow unicode dashes / quotes in rich formatting strings
+    "RUF002", # Allow unicode dashes in docstrings
+    "RUF003", # Allow unicode characters in comments
+    "RUF012", # Mutable class attributes in dataclass/tools
+    "RUF013", # Implicit Optional
+    "RUF059", # Unused unpacked variables in matplotlib / benchmarks
+    "F401",   # Keep unused imports for optional backends and demo dependencies
+    "F841",   # Unused local variables in benchmark measurements
+    "UP035",  # Typing.List / Dict in book scripts
+    "UP006",  # Typing.List / Dict in annotations
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ty]
+
+[tool.ty.src]
+include = ["chapter_*"]
+
+[tool.ty.rules]
+all = "ignore"
 

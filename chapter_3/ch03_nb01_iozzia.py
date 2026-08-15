@@ -1,299 +1,353 @@
-"""Fine-tune GPT-2 Small to generate Manim Python animation code.
+"""Synthetic Dataset Generation and Hyperparameter Optimization with Optuna.
 
 Companion script for Chapter 3 of "Domain Specific LLMs in Action"
-by Guglielmo Iozzia, Manning Publications, 2024.
+(Guglielmo Iozzia, Manning Publications, 2024).
 
-Uses Optuna-backed hyperparameter search via HF Trainer, followed by a
-full training run with the best found hyperparameters. Inference is
-evaluated by writing generated Manim snippets to a CSV file.
-A GPU is required.
-
-# Install missing requirements first (Colab / fresh env):
-# !pip install optuna
+Demonstrates generating synthetic Manim code, fine-tuning Qwen 2.5 0.5B,
+and searching for optimal hyperparameters using Optuna Bayesian optimization.
+Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
-# ---------------------------------------------------------------------------
-# Standard library
-# ---------------------------------------------------------------------------
-from __future__ import annotations
-import csv
+import os
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-# ---------------------------------------------------------------------------
+# Ensure root workspace is on pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # Third-party
-# ---------------------------------------------------------------------------
+import optuna
+import pandas as pd
 import torch
-from datasets import load_dataset
+from datasets import Dataset
+from peft import LoraConfig, get_peft_model
 from transformers import (
-    DataCollatorForLanguageModeling,
-    EarlyStoppingCallback,
-    GPT2LMHeadModel,
-    GPT2Tokenizer,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DATASET_NAME = "Edoh/manim_python"
-MODEL_NAME = "openai-community/gpt2"
-OUTPUT_DIR = "./gpt2-manim-python-finetuned"
-OUTPUT_CSV = "gpt2_manim_python_test_outputs.csv"
-
-# Training
-EVAL_STRATEGY = "epoch"
-SAVE_STRATEGY = "epoch"
-LOGGING_STEPS = 100
-SAVE_TOTAL_LIMIT = 2
-EARLY_STOPPING_PATIENCE = 2
-VALIDATION_SPLIT = 0.1
-MAX_TOKENIZED_LENGTH = 512
-
-# Hyperparameter search (Optuna)
-HP_TRIALS = 3
-HP_LR_MIN = 1e-5
-HP_LR_MAX = 5e-4
-HP_BATCH_SIZES = [2, 4, 8]
-HP_WEIGHT_DECAY_MAX = 0.3
-HP_EPOCHS_MIN = 3
-HP_EPOCHS_MAX = 6
-HP_WARMUP_MAX = 500
-HP_GRAD_ACCUM_CHOICES = [1, 2, 4]
-
-# Inference / generation
-GEN_MAX_LENGTH = 150
-GEN_NUM_BEAMS = 5
-GEN_TEMPERATURE = 0.7
-GEN_TOP_P = 0.9
-GEN_REPETITION_PENALTY = 1.2
-GEN_NO_REPEAT_NGRAM_SIZE = 2
+# Common functional & UI utilities
+from common.functional import map_tuple
+from common.ui import (
+    STYLE_INDEX,
+    STYLE_PRIMARY,
+    STYLE_SECONDARY,
+    STYLE_SUCCESS,
+    STYLE_TEXT,
+    STYLE_WARNING,
+    console,
+    create_table,
+    pause,
+    render_banner,
+    render_card,
+    render_code_block,
+    render_step,
+    render_takeaways,
+    status_spinner,
+)
 
 
 # ---------------------------------------------------------------------------
-# Data preparation
+# Immutable Domain Records & Constants
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ManimExample:
+    """Immutable prompt-code pair for animation generation."""
 
-def load_and_tokenise_dataset(tokenizer: GPT2Tokenizer):
-    """Load the Manim dataset, tokenise, and split off a validation set."""
-    dataset = load_dataset(DATASET_NAME)
-    print(dataset["train"][0])
+    prompt: str
+    code: str
 
-    tokenized_datasets = dataset.map(
-        lambda examples: preprocess_data(examples, tokenizer),
-        batched=True,
-        remove_columns=dataset["train"].column_names,
+
+@dataclass(frozen=True)
+class OptimalHyperparameters:
+    """Immutable container for Optuna best trial results."""
+
+    best_loss: float
+    learning_rate: float
+    lora_r: int
+    num_epochs: int
+
+
+MODEL_ID = "Qwen/Qwen2.5-0.5B"
+OUTPUT_DIR = "./output_dir"
+N_OPTUNA_TRIALS = 3
+EVAL_PROMPT = "Create a red circle that moves to the right"
+
+SAMPLE_MANIM_DATA: tuple[ManimExample, ...] = (
+    ManimExample(
+        prompt="Create a red circle that scales up and fades out.",
+        code="class ScalingCircle(Scene):\n    def construct(self):\n        c = Circle(color=RED)\n        self.play(Create(c))\n        self.play(c.animate.scale(2))\n        self.play(FadeOut(c))",
+    ),
+    ManimExample(
+        prompt="Draw a blue square and rotate it 90 degrees.",
+        code="class RotatingSquare(Scene):\n    def construct(self):\n        s = Square(color=BLUE)\n        self.play(Create(s))\n        self.play(Rotate(s, PI/2))",
+    ),
+    ManimExample(
+        prompt="Show a green triangle and transform it into a circle.",
+        code="class TriangleToCircle(Scene):\n    def construct(self):\n        t = Triangle(color=GREEN)\n        c = Circle(color=GREEN)\n        self.play(Create(t))\n        self.play(Transform(t, c))",
+    ),
+    ManimExample(
+        prompt="Display the text 'Hello World' with a write animation.",
+        code="class WriteText(Scene):\n    def construct(self):\n        text = Text('Hello World')\n        self.play(Write(text))",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Pure Functions & Data Preparation
+# ---------------------------------------------------------------------------
+def format_manim_instruction(example: ManimExample | Mapping[str, str]) -> str:
+    """Pure string constructor for prompt-to-code instruction tuning."""
+    prompt = example.prompt if isinstance(example, ManimExample) else example["prompt"]
+    code = example.code if isinstance(example, ManimExample) else example["code"]
+    return f"Instruction: Generate Manim Python code for the following animation.\nPrompt: {prompt}\nCode:\n{code}"
+
+
+def create_hf_dataset(examples: Sequence[ManimExample]) -> Dataset:
+    """Pure transformation from immutable examples into a Hugging Face Dataset."""
+    records = [{"prompt": ex.prompt, "code": ex.code} for ex in examples]
+    return Dataset.from_pandas(pd.DataFrame(records))
+
+
+def tokenize_prompt_code_pair(sample: Mapping[str, Any], tokenizer: Any, max_length: int = 512) -> dict[str, Any]:
+    """Pure tokenization mapping function."""
+    text = format_manim_instruction(sample)
+    tokens = tokenizer(text, truncation=True, max_length=max_length, padding=False)
+    tokens["labels"] = tokens["input_ids"].copy()
+    return tokens
+
+
+def run_optuna_objective(
+    trial: optuna.Trial,
+    train_dataset: Dataset,
+    eval_dataset: Dataset,
+    tokenizer: Any,
+) -> float:
+    """Objective function for Bayesian hyperparameter search."""
+    lr = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
+    lora_r = trial.suggest_categorical("lora_r", [8, 16, 32])
+    num_epochs = trial.suggest_int("num_train_epochs", 1, 3)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto",
     )
-
-    # Reserve 10% of training data for validation
-    train_val_split = tokenized_datasets["train"].train_test_split(test_size=VALIDATION_SPLIT)
-    tokenized_datasets["train"] = train_val_split["train"]
-    tokenized_datasets["validation"] = train_val_split["test"]
-
-    return dataset, tokenized_datasets
-
-
-def preprocess_data(examples: dict, tokenizer: GPT2Tokenizer) -> dict:
-    """Concatenate instruction/output pairs, tokenise, and set labels == input_ids."""
-    inputs = [
-        f"Instruction: {instr}\nOutput: {out}"
-        for instr, out in zip(examples["instruction"], examples["output"])
-    ]
-    tokenized = tokenizer(inputs, truncation=True, max_length=MAX_TOKENIZED_LENGTH, padding="max_length")
-    tokenized["labels"] = tokenized["input_ids"].copy()
-    return tokenized
-
-
-# ---------------------------------------------------------------------------
-# Hyperparameter search
-# ---------------------------------------------------------------------------
-
-def hp_space(trial) -> dict:
-    """Define the Optuna hyperparameter search space."""
-    return {
-        "learning_rate": trial.suggest_float("learning_rate", HP_LR_MIN, HP_LR_MAX, log=True),
-        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", HP_BATCH_SIZES),
-        "weight_decay": trial.suggest_float("weight_decay", 0.0, HP_WEIGHT_DECAY_MAX),
-        "num_train_epochs": trial.suggest_int("num_train_epochs", HP_EPOCHS_MIN, HP_EPOCHS_MAX),
-        "warmup_steps": trial.suggest_int("warmup_steps", 0, HP_WARMUP_MAX),
-        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", HP_GRAD_ACCUM_CHOICES),
-    }
-
-
-def run_hyperparameter_search(training_args: TrainingArguments, tokenized_datasets, tokenizer, data_collator):
-    """Run Optuna hyperparameter search; return the best run."""
-
-    def model_init():
-        # A fresh model is created for each trial; subsequent trials use the cached weights.
-        return GPT2LMHeadModel.from_pretrained(MODEL_NAME, device_map="auto")
-
-    trainer = Trainer(
-        model_init=model_init,
-        args=training_args,
-        train_dataset=tokenized_datasets["train"],
-        eval_dataset=tokenized_datasets["validation"],
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
+    lora_config = LoraConfig(
+        r=lora_r,
+        lora_alpha=lora_r * 2,
+        target_modules=["q_proj", "v_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
     )
-
-    best_run = trainer.hyperparameter_search(
-        direction="minimize",
-        backend="optuna",
-        n_trials=HP_TRIALS,
-        hp_space=hp_space,
-        compute_objective=lambda metrics: metrics["eval_loss"],
-    )
-    print("Best hyperparameters found:", best_run.hyperparameters)
-    return best_run
-
-
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
-def train_with_best_hyperparams(best_run, training_args: TrainingArguments, tokenized_datasets, tokenizer, data_collator) -> Trainer:
-    """Apply the best hyperparameters to training_args and train the final model."""
-    for key, value in best_run.hyperparameters.items():
-        setattr(training_args, key, value)
-
-    def model_init():
-        return GPT2LMHeadModel.from_pretrained(MODEL_NAME, device_map="auto")
-
-    trainer = Trainer(
-        model_init=model_init,
-        args=training_args,
-        train_dataset=tokenized_datasets["train"],
-        eval_dataset=tokenized_datasets.get("validation"),
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
-    )
-    trainer.train()
-
-    trainer.save_model(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    return trainer
-
-
-# ---------------------------------------------------------------------------
-# Inference
-# ---------------------------------------------------------------------------
-
-def load_finetuned_model(model_dir: str) -> tuple[GPT2LMHeadModel, GPT2Tokenizer, torch.device]:
-    """Load the fine-tuned model and tokenizer from disk to GPU memory."""
-    tokenizer = GPT2Tokenizer.from_pretrained(model_dir)
-    model = GPT2LMHeadModel.from_pretrained(model_dir)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-    return model, tokenizer, device
-
-
-def generate_output(
-    instruction: str,
-    model: GPT2LMHeadModel,
-    tokenizer: GPT2Tokenizer,
-    device: torch.device,
-    max_length: int = GEN_MAX_LENGTH,
-    num_beams: int = GEN_NUM_BEAMS,
-    temperature: float = GEN_TEMPERATURE,
-    top_p: float = GEN_TOP_P,
-    repetition_penalty: float = GEN_REPETITION_PENALTY,
-) -> str:
-    """Generate output text given an instruction using beam search and nucleus sampling.
-
-    Args:
-        instruction: The input instruction prompt.
-        model: Fine-tuned GPT-2 model.
-        tokenizer: Companion tokenizer.
-        device: Torch device to run inference on.
-        max_length: Maximum length of generated sequence (including prompt).
-        num_beams: Number of beams for beam search.
-        temperature: Sampling temperature; lower is less random.
-        top_p: Nucleus sampling probability threshold.
-        repetition_penalty: Penalty for repeated tokens (>1.0 discourages repetition).
-
-    Returns:
-        Generated output text (the portion after "Output:").
-    """
-    prompt = f"Instruction: {instruction}\nOutput:"
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-
-    generated_ids = model.generate(
-        input_ids,
-        max_length=max_length,
-        num_beams=num_beams,
-        temperature=temperature,
-        top_p=top_p,
-        repetition_penalty=repetition_penalty,
-        do_sample=True,
-        pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        early_stopping=True,
-        no_repeat_ngram_size=GEN_NO_REPEAT_NGRAM_SIZE,
-    )
-
-    generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    output_start = generated_text.find("Output:")
-    if output_start != -1:
-        return generated_text[output_start + len("Output:"):].strip()
-    return generated_text.strip()
-
-
-def run_inference_on_test_set(dataset, model, tokenizer, device) -> None:
-    """Run the fine-tuned model on every test sample and write results to CSV."""
-    with open(OUTPUT_CSV, mode="w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(
-            csvfile,
-            fieldnames=["instruction", "reference_output", "generated_output"],
-        )
-        writer.writeheader()
-
-        for example in dataset["test"]:
-            instruction = example["instruction"]
-            reference_output = example["output"]
-            generated = generate_output(instruction, model, tokenizer, device)
-            writer.writerow({
-                "instruction": instruction,
-                "reference_output": reference_output,
-                "generated_output": generated,
-            })
-
-    print(f"Inference complete. Results saved to {OUTPUT_CSV}")
-
-
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    """End-to-end pipeline: data prep → HP search → training → inference."""
-    tokenizer = GPT2Tokenizer.from_pretrained(MODEL_NAME)
-    tokenizer.pad_token = tokenizer.eos_token  # Required: GPT-2 has no dedicated pad token
-
-    raw_dataset, tokenized_datasets = load_and_tokenise_dataset(tokenizer)
-
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    model = get_peft_model(model, lora_config)
 
     training_args = TrainingArguments(
-        output_dir=OUTPUT_DIR,
-        eval_strategy=EVAL_STRATEGY,
-        save_strategy=SAVE_STRATEGY,
-        logging_strategy="steps",
-        logging_steps=LOGGING_STEPS,
-        save_total_limit=SAVE_TOTAL_LIMIT,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        fp16=True,
+        output_dir=f"{OUTPUT_DIR}/trial_{trial.number}",
+        learning_rate=lr,
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=2,
+        per_device_eval_batch_size=2,
+        eval_strategy="epoch",
+        logging_steps=10,
+        save_strategy="no",
         report_to="none",
     )
 
-    best_run = run_hyperparameter_search(training_args, tokenized_datasets, tokenizer, data_collator)
-    train_with_best_hyperparams(best_run, training_args, tokenized_datasets, tokenizer, data_collator)
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8),
+    )
 
-    model, inf_tokenizer, device = load_finetuned_model(OUTPUT_DIR)
-    run_inference_on_test_set(raw_dataset, model, inf_tokenizer, device)
+    trainer.train()
+    eval_results = trainer.evaluate()
+    return float(eval_results["eval_loss"])
+
+
+def generate_code_inference(model: Any, tokenizer: Any, prompt: str) -> str:
+    """Pure generative inference wrapper."""
+    input_text = f"Instruction: Generate Manim Python code for the following animation.\nPrompt: {prompt}\nCode:\n"
+    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperature=0.2)
+    return str(tokenizer.decode(outputs[0], skip_special_tokens=True))
+
+
+# ---------------------------------------------------------------------------
+# View / Rendering Functions
+# ---------------------------------------------------------------------------
+def render_dataset_preview(examples: Sequence[ManimExample]) -> None:
+    """Render preview table of synthetic dataset."""
+    columns = [
+        ("Animation Prompt", STYLE_PRIMARY, "left"),
+        ("Manim Code Snippet", STYLE_TEXT, "left"),
+    ]
+    rows = [(ex.prompt, ex.code[:80] + "...") for ex in examples[:2]]
+    console.print(create_table("Synthetic Manim Dataset Preview", columns, rows))
+    pause()
+
+
+def render_hyperparameters_table(best: OptimalHyperparameters) -> None:
+    """Render optimal hyperparameters table."""
+    columns = [
+        ("Hyperparameter", STYLE_PRIMARY, "left"),
+        ("Optimal Value", STYLE_SUCCESS, "right"),
+    ]
+    rows = [
+        ("Best Validation Loss", f"{best.best_loss:.4f}"),
+        ("Learning Rate", f"{best.learning_rate:.2e}"),
+        ("LoRA Rank (r)", str(best.lora_r)),
+        ("Training Epochs", str(best.num_epochs)),
+    ]
+    console.print(create_table("Optuna Hyperparameter Search Results", columns, rows))
+    pause()
+
+
+# ---------------------------------------------------------------------------
+# Main Pipeline
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Execute synthetic data and Optuna optimization pipeline."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    render_banner(
+        title="Synthetic Data Generation & Optuna Hyperparameter Tuning",
+        subtitle="Chapter 3: Domain-Specific Small Language Models",
+        metadata={
+            "Base Model": MODEL_ID,
+            "Optuna Trials": str(N_OPTUNA_TRIALS),
+            "Domain": "Manim Python Animation Code",
+        },
+        icon="🚀",
+    )
+
+    # Step 1: Creating Synthetic Dataset
+    render_step(1, "Creating Synthetic Manim Code Dataset", icon="📋")
+    raw_dataset = create_hf_dataset(SAMPLE_MANIM_DATA)
+    with status_spinner(f"Loading tokenizer for '{MODEL_ID}'..."):
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+    render_dataset_preview(SAMPLE_MANIM_DATA)
+
+    # Step 2: Tokenizing Dataset Splits
+    render_step(2, "Tokenizing & Splitting Train/Validation Sets", icon="⚙️")
+    tokenized_ds = raw_dataset.map(lambda s: tokenize_prompt_code_pair(s, tokenizer), batched=False)
+    split = tokenized_ds.train_test_split(test_size=0.25, seed=42)
+    train_ds, eval_ds = split["train"], split["test"]
+
+    render_card(
+        title="Dataset Split Counts",
+        content=(
+            f"[text.muted]Training Samples:[/text.muted] [text.highlight]{len(train_ds)}[/text.highlight]\n"
+            f"[text.muted]Validation Samples:[/text.muted] [text.highlight]{len(eval_ds)}[/text.highlight]"
+        ),
+        icon="✔",
+    )
+
+    # Step 3: Optuna Optimization
+    render_step(3, "Executing Bayesian Hyperparameter Search", icon="🔍")
+    study = optuna.create_study(direction="minimize")
+    with status_spinner(f"Running {N_OPTUNA_TRIALS} Bayesian optimization trials..."):
+        study.optimize(
+            lambda t: run_optuna_objective(t, train_ds, eval_ds, tokenizer),
+            n_trials=N_OPTUNA_TRIALS,
+        )
+
+    best_config = OptimalHyperparameters(
+        best_loss=study.best_value,
+        learning_rate=study.best_params["learning_rate"],
+        lora_r=study.best_params["lora_r"],
+        num_epochs=study.best_params["num_train_epochs"],
+    )
+    render_hyperparameters_table(best_config)
+
+    # Step 4: Fine-Tuning with Optimal Parameters
+    render_step(4, "Fine-Tuning Model with Optimal Hyperparameters", icon="🏋️")
+    with status_spinner("Training final model with best LoRA rank and learning rate..."):
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto",
+        )
+        lora_config = LoraConfig(
+            r=best_config.lora_r,
+            lora_alpha=best_config.lora_r * 2,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
+
+        training_args = TrainingArguments(
+            output_dir=f"{OUTPUT_DIR}/best_model",
+            learning_rate=best_config.learning_rate,
+            num_train_epochs=best_config.num_epochs,
+            per_device_train_batch_size=2,
+            eval_strategy="no",
+            save_strategy="epoch",
+            report_to="none",
+        )
+
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_ds,
+            eval_dataset=eval_ds,
+            data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8),
+        )
+        trainer.train()
+
+    render_card(
+        "Model Checkpoint",
+        f"Optimal model weights saved to:\n[text.highlight]{OUTPUT_DIR}/best_model[/text.highlight]",
+        icon="💾",
+    )
+
+    # Step 5: Code Generation
+    render_step(5, "Generating Manim Animation Python Code", icon="⚡")
+    with status_spinner(f"Generating code for '{EVAL_PROMPT}'..."):
+        generated_code = generate_code_inference(model, tokenizer, EVAL_PROMPT)
+
+    render_code_block(generated_code, language="python", title=f"Generated Manim Code: '{EVAL_PROMPT}'")
+
+    # Step 6: Exporting Artifacts
+    render_step(6, "Exporting Dataset Evaluation CSV", icon="💾")
+    test_csv_path = f"{OUTPUT_DIR}/test_set.csv"
+    pd.DataFrame([{"prompt": ex.prompt, "code": ex.code} for ex in SAMPLE_MANIM_DATA]).to_csv(
+        test_csv_path, index=False
+    )
+    render_card("Export Status", f"Dataset exported to [text.highlight]{test_csv_path}[/text.highlight]", icon="✔")
+
+    # Educational Takeaways
+    render_takeaways(
+        points=(
+            (
+                "Synthetic Data for Domain Specialization",
+                "Pairing domain-specific prompts with structured Python output teaches generalist SLMs precise syntax and library constraints (e.g. Manim animations).",
+            ),
+            (
+                "Bayesian Hyperparameter Search",
+                "Optuna uses Tree-structured Parzen Estimators (TPE) to find optimal learning rates and LoRA rank values far faster than brute-force grid search.",
+            ),
+            (
+                "Code Generation Temperature",
+                "Setting temperature=0.2 reduces token sampling entropy, ensuring deterministic syntax compilation without hallucinated method calls.",
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":

@@ -109,11 +109,13 @@ def render_banner(
 
 def render_step(step_number: int, title: str, icon: str = "◆") -> None:
     """Render a soothing, low-glare step delimiter rule."""
+    console.print()
     console.rule(
         f"[dim]{icon}[/dim] [primary]Step {step_number}:[/primary] [text]{title}[/text]",
         style=COLOR_BORDER,
         align="left",
     )
+    console.print()
     pause()
 
 

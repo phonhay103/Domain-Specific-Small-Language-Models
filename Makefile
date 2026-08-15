@@ -58,20 +58,20 @@ clean: ## Clean build artifacts, temporary models, and cache files
 # ---------------------------------------------------------------------------
 run-ch02: run-ch02-nb01 ## Run Chapter 2 default demo
 run-ch02-nb01: ## Ch02 NB01: FAISS Dense Vector Semantic Search
-	uv run python chapter_2/ch02_nb01_iozzia.py
+	uv run python chapter_2/ch02_nb01_faiss_search.py
 
 run-ch02-nb02: ## Ch02 NB02: DistilBERT SQuAD Extractive QA Fine-Tuning
-	uv run python chapter_2/ch02_nb02_iozzia.py
+	uv run python chapter_2/ch02_nb02_squad_finetuning.py
 
 run-ch02-nb03: ## Ch02 NB03: FLAN-T5 SAMSum Dialogue Summarization with LoRA
-	uv run python chapter_2/ch02_nb03_iozzia.py
+	uv run python chapter_2/ch02_nb03_lora_summarization.py
 
 # ---------------------------------------------------------------------------
 # Chapter 3: Domain Customization
 # ---------------------------------------------------------------------------
 run-ch03: run-ch03-nb01 ## Run Chapter 3 default demo
 run-ch03-nb01: ## Ch03 NB01: Optuna Hyperparameter Tuning for Synthetic Code
-	uv run python chapter_3/ch03_nb01_iozzia.py
+	uv run python chapter_3/ch03_nb01_synthetic_tuning.py
 
 # ---------------------------------------------------------------------------
 # Chapter 4: Inference Optimization

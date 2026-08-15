@@ -76,7 +76,7 @@ class OptimalHyperparameters:
 
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B"
-OUTPUT_DIR = "./output_dir"
+OUTPUT_DIR = "experiments"
 N_OPTUNA_TRIALS = 3
 EVAL_PROMPT = "Create a red circle that moves to the right"
 

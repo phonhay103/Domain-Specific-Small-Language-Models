@@ -78,10 +78,10 @@ run-ch03-nb01: ## Ch03 NB01: Optuna Hyperparameter Tuning for Synthetic Code
 # ---------------------------------------------------------------------------
 run-ch04: run-ch04-nb01 ## Run Chapter 4 default demo
 run-ch04-nb01: ## Ch04 NB01: GPT-2 KV-Cache & Left-Padded Batching Benchmark
-	uv run python chapter_4/ch04_nb01_iozzia.py
+	uv run python chapter_4/ch04_nb01_inference_optimization.py
 
 run-ch04-nb02: ## Ch04 NB02: DeepSpeed Inference Latency & Speedup Benchmark
-	uv run python chapter_4/ch04_nb02_iozzia.py
+	uv run python chapter_4/ch04_nb02_deepspeed_acceleration.py
 
 # ---------------------------------------------------------------------------
 # Chapter 5: ONNX Runtime & Graph Optimization

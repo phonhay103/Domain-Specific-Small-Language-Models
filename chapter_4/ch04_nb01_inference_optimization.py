@@ -48,11 +48,13 @@ from common.ui import (
 # Immutable Domain Records & Constants
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
-class KVCacheBenchmarkResult:
-    """Immutable latency measurements for KV cache comparison."""
+class StreamingComparisonResult:
+    """Immutable throughput measurements for streaming generation."""
 
-    latency_with_cache_ms: float
-    latency_without_cache_ms: float
+    with_cache_tokens_per_sec: float
+    without_cache_tokens_per_sec: float
+    with_cache_time_ms: float
+    without_cache_time_ms: float
     speedup_ratio: float
 
 
@@ -66,6 +68,28 @@ BATCH_PROMPTS: tuple[str, ...] = (
     "Once upon a time in a digital world,",
     "Artificial intelligence in medicine will",
 )
+
+
+BENCHMARK_PROMPT = (
+    "Deep learning is a subset of machine learning, which is essentially a neural network with three or more layers. "
+    "These neural networks attempt to simulate the behavior of the human brain—albeit far from matching its ability—allowing "
+    "it to 'learn' from large amounts of data. While a neural network with a single layer can still make approximate "
+    "predictions, additional hidden layers can help to optimize and refine for accuracy. Deep learning drives many "
+    "artificial intelligence (AI) applications and services that improve automation, performing analytical and physical "
+    "tasks without human intervention. Deep learning technology lies behind everyday products and services (such as digital "
+    "assistants, voice-enabled TV remotes, and credit card fraud detection) as well as emerging technologies (such as self-driving cars). "
+    "Neural networks, or artificial neural networks (ANNs), are comprised of node layers, containing an input layer, "
+    "one or more hidden layers, and an output layer. Each node, or artificial neuron, connects to another and has an associated weight and threshold. "
+    "If the output of any individual node is above the specified threshold value, that node is activated, sending data to the next layer of the network. "
+    "Otherwise, no data is passed along to the next layer. Deep learning models can be trained to recognize patterns "
+    "in data, such as images, text, and sound, to make accurate predictions. Large language models (LLMs) are a type of deep learning model "
+    "that can process and generate natural language. They are trained on massive text datasets, enabling them to understand "
+    "grammar, semantics, and context, and to produce coherent text. Today, we will explore how small language models (SLMs) "
+    "compare to their larger counterparts, looking at trade-offs in computational efficiency, memory footprint, "
+    "fine-tuning speed, and generalizability across niche domain tasks. Specifically, we will look at:"
+) * 2
+
+BENCHMARK_MAX_NEW_TOKENS = 80
 
 WARMUP_RUNS = 2
 BENCHMARK_RUNS = 5
@@ -122,42 +146,92 @@ def generate_batch_pure(
     )
 
 
-def measure_kv_cache_benchmark(
+def run_streaming_comparison(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompt: str,
-    max_new_tokens: int = MAX_NEW_TOKENS,
-) -> KVCacheBenchmarkResult:
-    """Benchmark autoregressive token generation with and without past KV tensors."""
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    max_new_tokens: int = 80,
+) -> StreamingComparisonResult:
+    """Run real-time streaming token generation with and without KV-cache and measure throughput."""
+    device = next(model.parameters()).device
 
-    def _timed_run(use_cache: bool) -> float:
-        config = GenerationConfig(
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            use_cache=use_cache,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-        for _ in range(WARMUP_RUNS):
-            with torch.inference_mode():
-                model.generate(**inputs, generation_config=config)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+    # -------------------------------------------------------------------------
+    # 1. WITH KV-CACHE
+    # -------------------------------------------------------------------------
+    console.print("\n[bold green]▶ Streaming Generation WITH KV-Cache:[/bold green]")
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-        start = time.perf_counter()
-        for _ in range(BENCHMARK_RUNS):
-            with torch.inference_mode():
-                model.generate(**inputs, generation_config=config)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-        return (time.perf_counter() - start) / BENCHMARK_RUNS
+    past_key_values = None
+    input_ids = inputs["input_ids"]
+    generated_tokens_with = []
 
-    time_with_cache = _timed_run(use_cache=True) * 1000.0
-    time_without_cache = _timed_run(use_cache=False) * 1000.0
+    with torch.inference_mode():
+        outputs = model(input_ids=input_ids, use_cache=True)
+    next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1)
+    generated_tokens_with.append(next_token.item())
 
-    return KVCacheBenchmarkResult(
-        latency_with_cache_ms=time_with_cache,
-        latency_without_cache_ms=time_without_cache,
+    token_text = tokenizer.decode(next_token, skip_special_tokens=True)
+    print(token_text, end="", flush=True)
+
+    input_ids = next_token.unsqueeze(0)
+    past_key_values = outputs.past_key_values
+
+    start_time = time.perf_counter()
+    for _ in range(max_new_tokens - 1):
+        with torch.inference_mode():
+            outputs = model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
+
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1)
+        generated_tokens_with.append(next_token.item())
+
+        token_text = tokenizer.decode(next_token, skip_special_tokens=True)
+        print(token_text, end="", flush=True)
+
+        input_ids = next_token.unsqueeze(0)
+        past_key_values = outputs.past_key_values
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    time_with_cache = (time.perf_counter() - start_time) * 1000.0
+    tokens_with_sec = len(generated_tokens_with) / (time_with_cache / 1000.0)
+
+    console.print(f"\n[dim]↳ Completed WITH cache in {time_with_cache:.2f} ms ({tokens_with_sec:.2f} tok/s)[/dim]\n")
+
+    # -------------------------------------------------------------------------
+    # 2. WITHOUT KV-CACHE
+    # -------------------------------------------------------------------------
+    console.print("[bold red]▶ Streaming Generation WITHOUT KV-Cache (re-computing entire sequence):[/bold red]")
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    input_ids = inputs["input_ids"]
+    generated_tokens_without = []
+
+    start_time = time.perf_counter()
+    for _ in range(max_new_tokens):
+        with torch.inference_mode():
+            outputs = model(input_ids=input_ids, use_cache=False)
+
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1)
+        generated_tokens_without.append(next_token.item())
+
+        token_text = tokenizer.decode(next_token, skip_special_tokens=True)
+        print(token_text, end="", flush=True)
+
+        input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=-1)
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    time_without_cache = (time.perf_counter() - start_time) * 1000.0
+    tokens_without_sec = len(generated_tokens_without) / (time_without_cache / 1000.0)
+
+    console.print(
+        f"\n[dim]↳ Completed WITHOUT cache in {time_without_cache:.2f} ms ({tokens_without_sec:.2f} tok/s)[/dim]\n"
+    )
+
+    return StreamingComparisonResult(
+        with_cache_tokens_per_sec=tokens_with_sec,
+        without_cache_tokens_per_sec=tokens_without_sec,
+        with_cache_time_ms=time_with_cache,
+        without_cache_time_ms=time_without_cache,
         speedup_ratio=calculate_speedup(time_without_cache, time_with_cache),
     )
 
@@ -175,24 +249,35 @@ def render_batch_results_table(prompts: Sequence[str], completions: Sequence[str
         ("Generated Continuation", STYLE_TEXT, "left"),
     ]
     rows = [
-        (i, prompt, comp.strip()[:100] + "...") for i, (prompt, comp) in enumerate(zip(prompts, completions), start=1)
+        (i, prompt, comp.strip()) for i, (prompt, comp) in enumerate(zip(prompts, completions), start=1)
     ]
     console.print(create_table("Batched Generation Results (Left-Padded)", columns, rows))
     pause()
 
 
-def render_kv_cache_table(res: KVCacheBenchmarkResult) -> None:
-    """Render KV cache comparison table."""
+def render_kv_cache_table(res: StreamingComparisonResult) -> None:
+    """Render KV cache throughput comparison table."""
     columns = [
         ("Configuration", STYLE_PRIMARY, "left"),
-        ("Latency (ms)", STYLE_WARNING, "right"),
+        ("Decoding Throughput", STYLE_WARNING, "right"),
+        ("Latency (ms)", STYLE_TEXT, "right"),
         ("Speedup Factor", STYLE_SUCCESS, "right"),
     ]
     rows = [
-        ("With KV-Cache (use_cache=True)", f"{res.latency_with_cache_ms:.2f} ms", f"{res.speedup_ratio:.2f}x"),
-        ("Without KV-Cache (use_cache=False)", f"{res.latency_without_cache_ms:.2f} ms", "1.00x (baseline)"),
+        (
+            "With KV-Cache (use_cache=True)",
+            f"{res.with_cache_tokens_per_sec:.1f} tok/s",
+            f"{res.with_cache_time_ms:.1f} ms",
+            f"{res.speedup_ratio:.2f}x",
+        ),
+        (
+            "Without KV-Cache (use_cache=False)",
+            f"{res.without_cache_tokens_per_sec:.1f} tok/s",
+            f"{res.without_cache_time_ms:.1f} ms",
+            "1.00x (baseline)",
+        ),
     ]
-    console.print(create_table("KV-Cache Impact Benchmark", columns, rows))
+    console.print(create_table("KV-Cache Real-Time Decoding Performance", columns, rows))
     pause()
 
 
@@ -255,10 +340,9 @@ def main() -> None:
     batch_completions = generate_batch_pure(model, tokenizer, BATCH_PROMPTS)
     render_batch_results_table(BATCH_PROMPTS, batch_completions)
 
-    # Step 5: KV-Cache Benchmark
-    render_step(5, "Benchmarking Autoregressive KV-Cache Acceleration", icon="📊")
-    with status_spinner(f"Running {BENCHMARK_RUNS} benchmark iterations with/without KV cache..."):
-        kv_res = measure_kv_cache_benchmark(model, tokenizer, BASE_PROMPT)
+    # Step 5: Streaming Token Comparison
+    render_step(5, "Real-Time Streaming Autoregressive Decoding & KV-Cache Comparison", icon="📊")
+    kv_res = run_streaming_comparison(model, tokenizer, BENCHMARK_PROMPT, max_new_tokens=BENCHMARK_MAX_NEW_TOKENS)
     render_kv_cache_table(kv_res)
 
     # Educational Takeaways

@@ -54,7 +54,8 @@ You can run individual chapter demonstrations directly via `make` or `uv run`:
 | :--- | :--- | :--- |
 | `make run-ch02` | FAISS Semantic Vector Search | [`chapter_2/ch02_nb01_faiss_search.py`](chapter_2/ch02_nb01_faiss_search.py) |
 | `make run-ch03` | Optuna Hyperparameter Optimization | [`chapter_3/ch03_nb01_synthetic_tuning.py`](chapter_3/ch03_nb01_synthetic_tuning.py) |
-| `make run-ch04` | KV-Cache & Batching Benchmark | [`chapter_4/ch04_nb01_iozzia.py`](chapter_4/ch04_nb01_iozzia.py) |
+| `make run-ch04` | KV-Cache & Batching Benchmark | [`chapter_4/ch04_nb01_inference_optimization.py`](chapter_4/ch04_nb01_inference_optimization.py) |
+| `make run-ch04-ds` | DeepSpeed Inference Acceleration | [`chapter_4/ch04_nb02_deepspeed_acceleration.py`](chapter_4/ch04_nb02_deepspeed_acceleration.py) |
 | `make run-ch05` | ONNX Conversion & CPU Graph Optimization | [`chapter_5/ch05_nb01_iozzia.py`](chapter_5/ch05_nb01_iozzia.py) |
 | `make run-ch06` | Absmax INT8 Quantization & Perplexity | [`chapter_6/ch06_nb01_iozzia.py`](chapter_6/ch06_nb01_iozzia.py) |
 | `make run-ch07` | CodeGen 350M Latency Percentiles (P50–P99) | [`chapter_7/ch07_nb01_iozzia.py`](chapter_7/ch07_nb01_iozzia.py) |

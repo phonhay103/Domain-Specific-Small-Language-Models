@@ -160,7 +160,8 @@ def create_training_arguments(output_dir: str) -> TrainingArguments:
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=3,
+        num_train_epochs=10,
+        fp16=torch.cuda.is_available(),
         weight_decay=0.01,
         push_to_hub=False,
         disable_tqdm=True,
@@ -302,9 +303,9 @@ def main() -> None:
     # Step 3: Model & Trainer Setup
     render_step(3, "Initializing Model & Training Configuration", icon="🧠")
     with status_spinner(f"Loading QA head for '{MODEL_ID}'..."):
-        model = AutoModelForQuestionAnswering.from_pretrained(MODEL_ID)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = AutoModelForQuestionAnswering.from_pretrained(MODEL_ID).to(device)
     render_device_info(next(model.parameters()).device, model=model)
-
     training_args = create_training_arguments(OUTPUT_DIR)
     trainer = Trainer(
         model=model,
@@ -318,7 +319,7 @@ def main() -> None:
 
     # Step 4: Training Execution
     render_step(4, "Executing DistilBERT Fine-Tuning", icon="🏋️")
-    with status_spinner("Running 3-epoch fine-tuning & evaluation loop..."):
+    with status_spinner("Running 10-epoch fine-tuning & evaluation loop..."):
         train_output = trainer.train()
 
     render_training_metrics_table(trainer.state.log_history, title="DistilBERT Fine-Tuning Progression")

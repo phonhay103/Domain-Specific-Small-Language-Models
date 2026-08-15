@@ -1,117 +1,100 @@
-# ==========================================
-# Extracted from CH11_NB03_Iozzia.ipynb
-# ==========================================
+"""
+Small Language Model Conversion and Inference with MLC LLM.
 
-# ------------------------------------------------------------
-# # Small Language Model Conversion and Inference with MLC LLM
-# This notebook is a companion of chapter 11 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook shows how to use [MLC LLM](https://llm.mlc.ai/) to convert and compile a Small Language Model hosted in the Hugging Face's Hub and then run inference with it on a Linux system. The model under consideration is of [RedPajama-INCITE-Instruct-3B-v1](https://huggingface.co/togethercomputer/RedPajama-INCITE-Instruct-3B-v1), but the code in this notebook applies to any other Open Source LLM hosted in the HF's Hub. Hardware acceleration is required.   
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+This script is a companion of chapter 11 of the "Domain Specific LLMs in Action" book,
+author Guglielmo Iozzia, Manning Publications, 2024.
 
-# ------------------------------------------------------------
-# Install the proper MLC LLM wheel for Linux and the CUDA drivers in this system.
-# ------------------------------------------------------------
+The code shows how to use MLC LLM (https://llm.mlc.ai/) to convert and compile a Small
+Language Model hosted in the Hugging Face Hub and then run inference with it on a Linux
+system. The model under consideration is RedPajama-INCITE-Instruct-3B-v1, but the code
+applies to any other Open Source LLM hosted in the HF Hub. Hardware acceleration is
+required.
 
-# !python -m pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cu122 mlc-ai-nightly-cu122
+More details about the code can be found in the related book's chapter.
 
-# ------------------------------------------------------------
-# Verify the MLC installation completed successfully.
-# ------------------------------------------------------------
+--- Prerequisite shell steps (run once before executing this script) ---
+# Install the proper MLC LLM wheel for Linux + CUDA 12.2:
+#   python -m pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cu122 mlc-ai-nightly-cu122
 
-# !mlc_llm --help
+# Verify installation:
+#   mlc_llm --help
 
-# ------------------------------------------------------------
-# # Model Conversion
-# ------------------------------------------------------------
+# --- Model Conversion (run once) ---
+# Create destination directories and clone model weights:
+#   mkdir -p dist/models && cd dist/models
+#   git lfs install
+#   git clone https://huggingface.co/togethercomputer/RedPajama-INCITE-Instruct-3B-v1
 
-# ------------------------------------------------------------
-# To run a model with MLC LLM, we need to convert the model weights into MLC format. Some preliminary actions to be done: create the destination directory for the original model's weights and accessory files, install the Git extension for versioning large files and clone the HF's repo for the target model.
-# ------------------------------------------------------------
+# Convert weights to MLC format:
+#   mlc_llm convert_weight ./RedPajama-INCITE-Instruct-3B-v1/ \\
+#       --quantization q4f16_1 \\
+#       -o dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC \\
+#       --device cuda:0
 
-# !mkdir -p dist/models && cd dist/models
-# !git lfs install
-# !git clone https://huggingface.co/togethercomputer/RedPajama-INCITE-Instruct-3B-v1
+# Generate chat configuration:
+#   mlc_llm gen_config ./RedPajama-INCITE-Instruct-3B-v1/ \\
+#       --quantization q4f16_1 --conv-template redpajama_chat \\
+#       -o dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC/
 
-# ------------------------------------------------------------
-# Convert the model weights to the MLC LLM format. The converted weights are saved into the same directory as for the original model.
-# ------------------------------------------------------------
+# Compile the model library:
+#   mkdir ./dist/libs
+#   mlc_llm compile ./dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC/mlc-chat-config.json \\
+#       --device cuda -o dist/libs/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-cuda.so
+"""
 
-# !mlc_llm convert_weight ./RedPajama-INCITE-Instruct-3B-v1/ \
-#     --quantization q4f16_1 \
-#     -o dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC \
-#     --device cuda:0
-
-# ------------------------------------------------------------
-# Generate the chat configuration for the converted model. The generated configuration is saved in the same directory as for the converted weights.
-# ------------------------------------------------------------
-
-# !mlc_llm gen_config ./RedPajama-INCITE-Instruct-3B-v1/ \
-#     --quantization q4f16_1 --conv-template redpajama_chat \
-#     -o dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC/
-
-# ------------------------------------------------------------
-# Verify that all the required files (the chat configuration file, the model's weights info, shards and tokenizer files) are within the destination directory.
-# ------------------------------------------------------------
-
-# !ls dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC
-
-# ------------------------------------------------------------
-# We need now to compile the converted model before we can run inference. Create a destination directory for the compiled model.
-# ------------------------------------------------------------
-
-# !mkdir ./dist/libs
-
-# ------------------------------------------------------------
-# Compile the model library using the specification in chat configuration file preliminary created (*mlc-chat-config.json*).
-# ------------------------------------------------------------
-
-# !mlc_llm compile ./dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC/mlc-chat-config.json \
-#     --device cuda -o dist/libs/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-cuda.so
-
-# ------------------------------------------------------------
-# Verify that the model compilation completed successfully. For Linux systems and CUDA drivers the compilation directory should contain a single compiled library file. Please refer to the official MLC LLM documentation for other operating systems and hardware accelerators.
-# ------------------------------------------------------------
-
-# !ls dist/libs
-
-# ------------------------------------------------------------
-# # Chat with the Converted model using the MLC LLM Python API
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Create an instace of the MLCEngine for the converted model. This class supports only synchronous chat completions.
-# ------------------------------------------------------------
-
+# third-party
 from mlc_llm import MLCEngine
 
-engine = MLCEngine(model="./dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC",
-                   model_lib="./dist/libs/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-cuda.so")
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MODEL_DIR = "./dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC"
+MODEL_LIB = "./dist/libs/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-cuda.so"
+CHAT_QUESTION = "What's the meaning of life?"
 
-# ------------------------------------------------------------
-# Start some chat examples.
-# ------------------------------------------------------------
 
-for response in engine.chat.completions.create(
-    messages=[{"role": "user", "content": "What's the meaning of life?"}],
-    model="./dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC",
-    stream=False,
-):
-    print(response)
-print("\n")
+# ---------------------------------------------------------------------------
+# Functions
+# ---------------------------------------------------------------------------
 
-for response in engine.chat.completions.create(
-    messages=[{"role": "user", "content": "What's the meaning of life?"}],
-    model="./dist/RedPajama-INCITE-Instruct-3B-v1-q4f16_1-MLC",
-    stream=True,
-):
-    for choice in response.choices:
-        print(choice.delta.content, end="", flush=True)
-print("\n")
+def run_sync_completion(engine: MLCEngine, question: str) -> None:
+    """Run a single synchronous chat completion and print the response."""
+    for response in engine.chat.completions.create(
+        messages=[{"role": "user", "content": question}],
+        model=MODEL_DIR,
+        stream=False,
+    ):
+        print(response)
+    print("\n")
 
-# ------------------------------------------------------------
-# Shutdown the MLC engine.
-# ------------------------------------------------------------
 
-engine.terminate()
+def run_streaming_completion(engine: MLCEngine, question: str) -> None:
+    """Run a streaming chat completion and print tokens as they arrive."""
+    for response in engine.chat.completions.create(
+        messages=[{"role": "user", "content": question}],
+        model=MODEL_DIR,
+        stream=True,
+    ):
+        for choice in response.choices:
+            print(choice.delta.content, end="", flush=True)
+    print("\n")
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Create an MLCEngine, run example completions, then shut down cleanly."""
+    # Create an instance of the MLCEngine for the converted model.
+    # This class supports only synchronous chat completions.
+    engine = MLCEngine(model=MODEL_DIR, model_lib=MODEL_LIB)
+
+    run_sync_completion(engine, CHAT_QUESTION)
+    run_streaming_completion(engine, CHAT_QUESTION)
+
+    engine.terminate()
+
+
+if __name__ == "__main__":
+    main()

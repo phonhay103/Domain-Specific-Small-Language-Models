@@ -1,328 +1,266 @@
-# ==========================================
-# Extracted from CH07_NB01_Iozzia.ipynb
-# ==========================================
+"""Benchmarking Python Code Generation with Vanilla, ONNX Converted and Quantized CodeGen Models.
 
-# ------------------------------------------------------------
-# # Benchmarking Python Code Generation with Vanilla, ONNX Converted and Quantized CodeGen Models
-# This notebook is a companion of chapter 7 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook is to benchmark inference performance (latency and throughtput) when generating Python code using a Vanilla [CodeGen](https://huggingface.co/Salesforce/codegen-350M-mono) 350M mono model, after ONNX conversion of the same model and after 8-bit quantization. It doesn't require hardware acceleration.  
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+This script is a companion of chapter 7 of the "Domain Specific LLMs in Action"
+book, author Guglielmo Iozzia, Manning Publications, 2024.
+It benchmarks inference performance (latency and throughput) when generating
+Python code using a Vanilla CodeGen 350M mono model, after ONNX conversion of
+the same model, and after 8-bit quantization. It doesn't require hardware
+acceleration.
+More details about the code can be found in the related book's chapter.
 
-# ------------------------------------------------------------
-# Install the missing requirements in the ColabVM (only Optimum for the ONNX runtime).
-# ------------------------------------------------------------
+# Install notes (run once in your environment):
+#   pip install optimum[onnxruntime]==1.21.2
+#   pip install -U transformers
+"""
 
-# !pip install optimum[onnxruntime]==1.21.2
-
-# ------------------------------------------------------------
-# Update the Transformers library to the latest version. A runtime restart is needed after.
-# ------------------------------------------------------------
-
-# !pip install -U transformers
-
-# ------------------------------------------------------------
-# ### Vanilla Model
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Download the CodeGen 350 M mono model and its tokenizer from the HF's Hub.
-# ------------------------------------------------------------
-
-from transformers import AutoTokenizer
-
-device = "cpu"
-model_id = "Salesforce/codegen-350M-mono"
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-from transformers import CodeGenForCausalLM
-
-model = CodeGenForCausalLM.from_pretrained(model_id).to(device)
-model.eval()
-
-# ------------------------------------------------------------
-# Set a text prompt (a Python function header) to be used across benchmarks.
-# ------------------------------------------------------------
-
-prompt = "def hello_world():"
-
-# ------------------------------------------------------------
-# The code in the following cell is just to verify that model and tokenizer have been downloaded properly. You can skip its execution.
-# ------------------------------------------------------------
-
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-generated_ids = model.generate(input_ids, max_length=12)
-print(tokenizer.decode(generated_ids[0],
-                       skip_special_tokens=True,
-                       pad_token_id=50256))
-
-# ------------------------------------------------------------
-# Setup a Transformers' pipeline for inference with the Vanilla model.
-# ------------------------------------------------------------
-
-from transformers import pipeline
-
-pipe = pipeline("text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                pad_token_id=50256,
-                truncation=True,
-                max_length=12
-      )
-
-# ------------------------------------------------------------
-# Test the pipeline.
-# ------------------------------------------------------------
-
-result = pipe(prompt)
-print(result[0]['generated_text'])
-
-tokenizer.save_pretrained("local-pt-checkpoint")
-model.save_pretrained("local-pt-checkpoint")
-
-# ------------------------------------------------------------
-# Define some utils for benchmarking (more details about them in chapter 6 of the book).
-# ------------------------------------------------------------
-
+# --- stdlib ---
+import gc
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
+from typing import Generator
 
-@contextmanager
-def track_infer_time(time_buffer):
-    start_time = perf_counter()
-    yield
-    end_time = perf_counter()
+# --- third-party ---
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from optimum.onnxruntime import ORTModelForCausalLM, ORTQuantizer
+from optimum.onnxruntime.configuration import AutoQuantizationConfig
+from transformers import AutoTokenizer, CodeGenForCausalLM, pipeline
+from tqdm import trange
 
-    time_buffer.append(end_time - start_time)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MODEL_ID = "Salesforce/codegen-350M-mono"
+LOCAL_CHECKPOINT_DIR = "local-pt-checkpoint"
+ONNX_PATH = Path("onnx")
+QUANTIZED_MODEL_FILE = "model_quantized.onnx"
+DEVICE = "cpu"
+PAD_TOKEN_ID = 50256
+MAX_GEN_LENGTH = 12
+BENCHMARK_PROMPT = "def hello_world():"
+WARMUP_RUNS = 10
+BENCHMARK_RUNS = 100
+
+# Providers for each benchmark phase
+PYTORCH_PROVIDERS = {("cpu", "PyTorch CPU")}
+ONNX_PROVIDERS = {("CPUExecutionProvider", "ONNX CPU")}
+ONNX_QUANT_PROVIDERS = {("CPUExecutionProvider", "ONNX Quant CPU")}
+
+# Performance table column labels
+PERF_INDEX_LABELS = [
+    "Average_latency (ms)", "Latency_P50", "Latency_P75",
+    "Latency_P90", "Latency_P95", "Latency_P99", "Throughput",
+]
+
+
+# ---------------------------------------------------------------------------
+# Dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class BenchmarkInferenceResult:
-    model_inference_time: [int]
+    """Stores raw inference times and optional optimized model path for one run."""
+
+    model_inference_time: list
     optimized_model_path: str
 
-# ------------------------------------------------------------
-# Define a custom funtion to be reused across benchmarks with the different versions of the model under evaluation.
-# ------------------------------------------------------------
 
-from tqdm import trange
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
-def benchmark_inference(providers_dict, pipe, prompt, results):
-  for device, label in PROVIDERS:
-      for _ in trange(10, desc="Warming up"):
-        pipe(prompt)
+@contextmanager
+def track_infer_time(time_buffer: list) -> Generator:
+    """Context manager that appends elapsed wall-clock time (s) to *time_buffer*."""
+    start_time = perf_counter()
+    yield
+    time_buffer.append(perf_counter() - start_time)
 
-      time_buffer = []
-      for _ in trange(100, desc=f"Tracking inference time ({label})"):
-        with track_infer_time(time_buffer):
-          pipe(prompt)
 
-      results[label] = BenchmarkInferenceResult(
-          time_buffer,
-          None
-      )
+def benchmark_inference(
+    providers_dict: set,
+    pipe,
+    prompt: str,
+    results: dict,
+) -> dict:
+    """Warm up then benchmark *pipe* for each provider label; store results in *results*."""
+    for device, label in providers_dict:
+        for _ in trange(WARMUP_RUNS, desc="Warming up"):
+            pipe(prompt)
 
-  return results
+        time_buffer = []
+        for _ in trange(BENCHMARK_RUNS, desc=f"Tracking inference time ({label})"):
+            with track_infer_time(time_buffer):
+                pipe(prompt)
 
-# ------------------------------------------------------------
-# Execute the benchmarks for the CodeGen vanilla model.
-# ------------------------------------------------------------
+        results[label] = BenchmarkInferenceResult(time_buffer, None)
 
-results = {}
-PROVIDERS = {
-    ("cpu", "PyTorch CPU"),
-}
-results = benchmark_inference(PROVIDERS, pipe, prompt, results)
+    return results
 
-# ------------------------------------------------------------
-# ### ONNX Conversion
-# ------------------------------------------------------------
 
-# ------------------------------------------------------------
-# To prevent potential out of memory issues, let's delete the original model from memory.
-# ------------------------------------------------------------
-
-import gc
-
-del model
-gc.collect()
-
-# ------------------------------------------------------------
-# Convert the CodeGen 350M mono model using the Optimum package.
-# ------------------------------------------------------------
-
-from optimum.onnxruntime import ORTModelForCausalLM
-
-model_id = 'Salesforce/codegen-350M-mono'
-model = ORTModelForCausalLM.from_pretrained(model_id,
-                                            export=True,
-                                            provider="CPUExecutionProvider")
-
-# ------------------------------------------------------------
-# Save the converted model to disk.
-# ------------------------------------------------------------
-
-from pathlib import Path
-
-onnx_path = Path("onnx")
-model.save_pretrained(onnx_path)
-
-# ------------------------------------------------------------
-# Setup a pipeline for inference with the ONNX converted CodeGen 350M mono model.
-# ------------------------------------------------------------
-
-pipe = pipeline("text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                pad_token_id=50256,
-                truncation=True,
-                max_length=12
-                )
-
-# ------------------------------------------------------------
-# Verify that the pipeline works.
-# ------------------------------------------------------------
-
-result = pipe(prompt)
-result
-
-# ------------------------------------------------------------
-# Repeat the benchmark on the ONNX converted model.
-# ------------------------------------------------------------
-
-PROVIDERS = {
-    ("CPUExecutionProvider", "ONNX CPU"),
-}
-results = benchmark_inference(PROVIDERS, pipe, prompt, results)
-
-# ------------------------------------------------------------
-# ### 8-bit Quantization
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# To prevent potential out of memory issues, let's delete the pipeline from memory.
-# ------------------------------------------------------------
-
-del pipe
-gc.collect()
-
-# ------------------------------------------------------------
-# Do dynamic 8-bit quantization of the ONNX converted model and save it to disk.
-# ------------------------------------------------------------
-
-from optimum.onnxruntime import ORTQuantizer
-from optimum.onnxruntime.configuration import AutoQuantizationConfig
-
-dynamic_quantizer = ORTQuantizer.from_pretrained(model)
-dqconfig = AutoQuantizationConfig.avx512_vnni(is_static=False,
-                                              per_channel=False)
-
-model_quantized_path = dynamic_quantizer.quantize(
-    save_dir=onnx_path,
-    quantization_config=dqconfig,
-)
-
-# ------------------------------------------------------------
-# Load the quantized model in memory before setting the pipeline for it.
-# ------------------------------------------------------------
-
-quantized_model = ORTModelForCausalLM.from_pretrained("onnx", file_name="model_quantized.onnx")
-
-# ------------------------------------------------------------
-# Setup the pipeline for inference with the quantized model.
-# ------------------------------------------------------------
-
-pipe = pipeline("text-generation",
-                model=quantized_model,
-                tokenizer=tokenizer,
-                pad_token_id=50256,
-                truncation=True,
-                max_length=12
-                )
-
-# ------------------------------------------------------------
-# Verify that the pipeline works as expected.
-# ------------------------------------------------------------
-
-result = pipe(prompt)
-result
-
-# ------------------------------------------------------------
-# Repeat the benchmark on the quantized model.
-# ------------------------------------------------------------
-
-PROVIDERS = {
-    ("CPUExecutionProvider", "ONNX Quant CPU"),
-}
-results = benchmark_inference(PROVIDERS, pipe, prompt, results)
-
-# ------------------------------------------------------------
-# ### Results of the Benchmarks
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Visually compare the average inference times across benchmarks for the 3 different versions of the model.
-# ------------------------------------------------------------
-
-import numpy as np
-import plotly.express as px
-
-# Compute average inference time
-time_results = {k: np.mean(v.model_inference_time) * 1e3 for k, v in results.items()}
-
-fig = px.bar(x=time_results.keys(), y=time_results.values(),
-             title="Average inference time (ms) for each provider",
-             labels={'x':'Provider', 'y':'Avg Inference time (ms)'},
-             text_auto='.2s')
-fig.show()
-
-# ------------------------------------------------------------
-# Calculate latency and throughput metrics for the 3 benchmark sets and put them into a Pandas DataFrame.
-# ------------------------------------------------------------
-
-time_results = {k: np.mean(v.model_inference_time) * 1e3 for k, v in results.items()}
-time_results_std = {k: np.std(v.model_inference_time) * 1000 for k, v in results.items()}
-
-perf_results = {}
-for k, v in results.items():
-  latency_list = v.model_inference_time
-  latency_50 = np.percentile(latency_list, 50) * 1e3
-  latency_75 = np.percentile(latency_list, 75) * 1e3
-  latency_90 = np.percentile(latency_list, 90) * 1e3
-  latency_95 = np.percentile(latency_list, 95) * 1e3
-  latency_99 = np.percentile(latency_list, 99) * 1e3
-
-  average_latency = np.mean(v.model_inference_time) * 1e3
-  throughput = 1 * (1000 / average_latency)
-
-  perf_results[k] = (
-        average_latency,
-        latency_50,
-        latency_75,
-        latency_90,
-        latency_95,
-        latency_99,
-        throughput,
+def make_pipeline(model, tokenizer) -> pipeline:
+    """Build a text-generation pipeline with shared settings."""
+    return pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        pad_token_id=PAD_TOKEN_ID,
+        truncation=True,
+        max_length=MAX_GEN_LENGTH,
     )
 
-import pandas as pd
 
-index_labels = ['Average_latency (ms)', 'Latency_P50', 'Latency_P75',
-                'Latency_P90', 'Latency_P95', 'Latency_P99', 'Throughput']
-perf_df = pd.DataFrame(data=perf_results, index=index_labels)
-perf_df
+# ---------------------------------------------------------------------------
+# Benchmark phases
+# ---------------------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Visually compare inference durations across benchmarks for the 3 different versions of the model.
-# ------------------------------------------------------------
+def run_vanilla_benchmark(tokenizer, results: dict) -> tuple:
+    """Download CodeGen, verify generation, save checkpoint, and run PyTorch benchmark."""
+    model = CodeGenForCausalLM.from_pretrained(MODEL_ID).to(DEVICE)
+    model.eval()
 
-results_df = pd.DataFrame(columns=['Provider', 'Inference_time'])
-for k, v in results.items():
-  for i in range(len(v.model_inference_time)):
-    results_df.loc[len(results_df.index)] = [k, v.model_inference_time[i] * 1e3]
+    # Verify the model generates correctly before benchmarking
+    input_ids = tokenizer(BENCHMARK_PROMPT, return_tensors="pt").input_ids
+    generated_ids = model.generate(input_ids, max_length=MAX_GEN_LENGTH)
+    print(tokenizer.decode(generated_ids[0], skip_special_tokens=True, pad_token_id=PAD_TOKEN_ID))
 
-fig = px.box(results_df, x="Provider", y="Inference_time",
-             points="all",
-             labels={'Provider':'Provider', 'Inference_time':'Inference durations (ms)'})
-fig.show()
+    pipe = make_pipeline(model, tokenizer)
+    result = pipe(BENCHMARK_PROMPT)
+    print(result[0]["generated_text"])
 
+    # Save checkpoint for later ONNX conversion reference
+    tokenizer.save_pretrained(LOCAL_CHECKPOINT_DIR)
+    model.save_pretrained(LOCAL_CHECKPOINT_DIR)
+
+    results = benchmark_inference(PYTORCH_PROVIDERS, pipe, BENCHMARK_PROMPT, results)
+
+    # Free memory before ONNX conversion
+    del model
+    gc.collect()
+
+    return pipe, results
+
+
+def run_onnx_benchmark(tokenizer, results: dict) -> tuple:
+    """Convert CodeGen to ONNX, save to disk, and run ONNX CPU benchmark."""
+    model = ORTModelForCausalLM.from_pretrained(
+        MODEL_ID, export=True, provider="CPUExecutionProvider"
+    )
+    model.save_pretrained(ONNX_PATH)
+
+    pipe = make_pipeline(model, tokenizer)
+    result = pipe(BENCHMARK_PROMPT)
+    print(result)
+
+    results = benchmark_inference(ONNX_PROVIDERS, pipe, BENCHMARK_PROMPT, results)
+
+    return model, pipe, results
+
+
+def run_quantized_benchmark(onnx_model, tokenizer, results: dict) -> dict:
+    """Dynamically quantize the ONNX model and run the quantized benchmark."""
+    dynamic_quantizer = ORTQuantizer.from_pretrained(onnx_model)
+    dqconfig = AutoQuantizationConfig.avx512_vnni(is_static=False, per_channel=False)
+    dynamic_quantizer.quantize(save_dir=ONNX_PATH, quantization_config=dqconfig)
+
+    quantized_model = ORTModelForCausalLM.from_pretrained(
+        str(ONNX_PATH), file_name=QUANTIZED_MODEL_FILE
+    )
+    pipe = make_pipeline(quantized_model, tokenizer)
+    result = pipe(BENCHMARK_PROMPT)
+    print(result)
+
+    results = benchmark_inference(ONNX_QUANT_PROVIDERS, pipe, BENCHMARK_PROMPT, results)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Results reporting
+# ---------------------------------------------------------------------------
+
+def plot_average_inference_times(results: dict) -> None:
+    """Bar chart of average inference time (ms) across providers."""
+    time_results = {k: np.mean(v.model_inference_time) * 1e3 for k, v in results.items()}
+    fig = px.bar(
+        x=list(time_results.keys()),
+        y=list(time_results.values()),
+        title="Average inference time (ms) for each provider",
+        labels={"x": "Provider", "y": "Avg Inference time (ms)"},
+        text_auto=".2s",
+    )
+    fig.show()
+
+
+def build_perf_dataframe(results: dict) -> pd.DataFrame:
+    """Compute latency percentiles and throughput and return as a DataFrame."""
+    perf_results = {}
+    for k, v in results.items():
+        latency_list = v.model_inference_time
+        average_latency = np.mean(latency_list) * 1e3
+        throughput = 1 * (1000 / average_latency)
+        perf_results[k] = (
+            average_latency,
+            np.percentile(latency_list, 50) * 1e3,
+            np.percentile(latency_list, 75) * 1e3,
+            np.percentile(latency_list, 90) * 1e3,
+            np.percentile(latency_list, 95) * 1e3,
+            np.percentile(latency_list, 99) * 1e3,
+            throughput,
+        )
+    return pd.DataFrame(data=perf_results, index=PERF_INDEX_LABELS)
+
+
+def plot_inference_duration_box(results: dict) -> None:
+    """Box-plot of inference durations across all runs for each provider."""
+    results_df = pd.DataFrame(columns=["Provider", "Inference_time"])
+    for k, v in results.items():
+        for t in v.model_inference_time:
+            results_df.loc[len(results_df.index)] = [k, t * 1e3]
+
+    fig = px.box(
+        results_df,
+        x="Provider",
+        y="Inference_time",
+        points="all",
+        labels={"Provider": "Provider", "Inference_time": "Inference durations (ms)"},
+    )
+    fig.show()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Orchestrate vanilla → ONNX → quantized benchmarks and display results."""
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
+    results: dict = {}
+
+    # Phase 1: Vanilla PyTorch model
+    _vanilla_pipe, results = run_vanilla_benchmark(tokenizer, results)
+
+    # Phase 2: ONNX converted model
+    onnx_model, onnx_pipe, results = run_onnx_benchmark(tokenizer, results)
+
+    # Free the ONNX pipeline before quantization to avoid OOM
+    del onnx_pipe
+    gc.collect()
+
+    # Phase 3: 8-bit quantized ONNX model
+    results = run_quantized_benchmark(onnx_model, tokenizer, results)
+
+    # Visualise and report
+    plot_average_inference_times(results)
+
+    perf_df = build_perf_dataframe(results)
+    print(perf_df)
+
+    plot_inference_duration_box(results)
+
+
+if __name__ == "__main__":
+    main()

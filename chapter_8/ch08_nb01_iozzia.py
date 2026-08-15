@@ -1,41 +1,60 @@
-# ==========================================
-# Extracted from CH08_NB01_Iozzia.ipynb
-# ==========================================
+"""
+Generating Protein Sequences with ProtGPT2 Locally.
 
-# ------------------------------------------------------------
-# # Generating Protein Sequences with ProtGPT2 Locally
-# This notebook is a companion of chapter 8 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook is to generate protein sequences using the [ProtGPT2](https://huggingface.co/nferruz/ProtGPT2) model. It doesn't require hardware acceleration.  
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+Companion to Chapter 8 of "Domain Specific LLMs in Action" by Guglielmo Iozzia,
+Manning Publications, 2024.
 
-# ------------------------------------------------------------
-# Download the ProtGPT2 model from the HF Hub and set up an inference pipeline for it.
-# ------------------------------------------------------------
+Generates protein sequences using the ProtGPT2 model and evaluates them with
+both per-sequence and batch perplexity metrics. GPU acceleration is not required.
+"""
 
-from transformers import pipeline
-
-model_id = "nferruz/ProtGPT2"
-protgpt2 = pipeline('text-generation', model=model_id)
-
-# ------------------------------------------------------------
-# Use the pipeline to start generating protein sequences (10 in this example). At the end of the generation process the protein sequences are displayed on the standard output.
-# ------------------------------------------------------------
-
-sequences = protgpt2("<|endoftext|>", max_length=100, do_sample=True, top_k=950,
-                     repetition_penalty=1.2, num_return_sequences=10,
-                     eos_token_id=0)
-for seq in sequences:
-  print(seq)
-
-# ------------------------------------------------------------
-# Define a function to calculate the perplexity metric for the generated results.
-# ------------------------------------------------------------
+from typing import Dict, List
 
 import torch
+from transformers import pipeline
 
-def calculate_perplexity(model, tokenizer, text, device):
-    encodings = tokenizer(text, return_tensors='pt').to(device)
+# Model constant
+MODEL_ID = "nferruz/ProtGPT2"
+
+# Generation hyperparameters
+GENERATION_PROMPT = "<|endoftext|>"
+GENERATION_MAX_LENGTH = 100
+GENERATION_TOP_K = 950
+GENERATION_REPETITION_PENALTY = 1.2
+GENERATION_NUM_SEQUENCES = 10
+GENERATION_EOS_TOKEN_ID = 0
+
+# Perplexity evaluation settings
+EVAL_DEVICE = "cpu"
+
+
+# ---- Model loading ----
+
+def load_pipeline(model_id: str):
+    """Load the ProtGPT2 text-generation pipeline from the HF Hub."""
+    return pipeline("text-generation", model=model_id)
+
+
+# ---- Sequence generation ----
+
+def generate_sequences(protgpt2) -> List[Dict]:
+    """Generate protein sequences using ProtGPT2 and return raw output dicts."""
+    return protgpt2(
+        GENERATION_PROMPT,
+        max_length=GENERATION_MAX_LENGTH,
+        do_sample=True,
+        top_k=GENERATION_TOP_K,
+        repetition_penalty=GENERATION_REPETITION_PENALTY,
+        num_return_sequences=GENERATION_NUM_SEQUENCES,
+        eos_token_id=GENERATION_EOS_TOKEN_ID,
+    )
+
+
+# ---- Perplexity metrics ----
+
+def calculate_perplexity(model, tokenizer, text: str, device: str) -> torch.Tensor:
+    """Compute per-sequence perplexity using the model's NLL loss."""
+    encodings = tokenizer(text, return_tensors="pt").to(device)
 
     input_ids = encodings.input_ids
     target_ids = input_ids.clone()
@@ -44,40 +63,26 @@ def calculate_perplexity(model, tokenizer, text, device):
         outputs = model(input_ids, labels=target_ids)
 
     neg_log_likelihood = outputs.loss
-
     perplexity = torch.exp(neg_log_likelihood)
-
     return perplexity
 
-# ------------------------------------------------------------
-# Evaluate the generated results by calculating the perplexity metric for them.
-# ------------------------------------------------------------
 
-device = 'cpu'
-for seq in sequences:
-  print(calculate_perplexity(protgpt2.model, protgpt2.tokenizer,
-                       seq['generated_text'], device))
-
-# ------------------------------------------------------------
-# Alternatively we can calculate perplexity on a batch of generated protein sequences. Let's define a custom function for this.
-# ------------------------------------------------------------
-
-protgpt2.tokenizer.pad_token = protgpt2.tokenizer.eos_token
-
-def calculate_batch_perplexity(input_texts, model, tokenizer):
+def calculate_batch_perplexity(
+    input_texts: List[str],
+    model,
+    tokenizer,
+) -> Dict[str, torch.Tensor]:
     """
     Calculate perplexity for a batch of input texts using a pretrained language model.
 
     Args:
-    - input_texts (List[str]): A list of input texts to evaluate.
+        input_texts: A list of input texts to evaluate.
 
     Returns:
-    - List[float]: A list of perplexity scores, one for each input text.
+        A dict with 'perplexities' (one score per sequence) and 'mean_perplexity'.
     """
     # Tokenize the batch of texts with padding for uniform length
-    inputs = tokenizer(
-        input_texts, return_tensors="pt", padding=True, truncation=True
-    )
+    inputs = tokenizer(input_texts, return_tensors="pt", padding=True, truncation=True)
 
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
@@ -102,7 +107,9 @@ def calculate_batch_perplexity(input_texts, model, tokenizer):
     target_log_probs = target_log_probs * attention_mask[:, 1:].to(log_probs.dtype)
 
     # Compute the mean negative log-likelihood for each sequence
-    negative_log_likelihood = -target_log_probs.sum(dim=-1) / attention_mask[:, 1:].sum(dim=-1)
+    negative_log_likelihood = (
+        -target_log_probs.sum(dim=-1) / attention_mask[:, 1:].sum(dim=-1)
+    )
 
     # Compute perplexity for each sequence
     perplexities = torch.exp(negative_log_likelihood)
@@ -112,11 +119,34 @@ def calculate_batch_perplexity(input_texts, model, tokenizer):
 
     return {"perplexities": perplexities, "mean_perplexity": mean_perplexity_score}
 
-# ------------------------------------------------------------
-# Execute the ```calculate_batch_perplexity``` function on the generated protein sequences.
-# 
-# ------------------------------------------------------------
 
-sequence_texts = [seq['generated_text'] for seq in sequences]
-print(f"Perplexity scores: {calculate_batch_perplexity(sequence_texts, protgpt2.model, protgpt2.tokenizer)}")
+# ---- Main orchestration ----
 
+def main() -> None:
+    """Load ProtGPT2, generate protein sequences, and evaluate perplexity."""
+    protgpt2 = load_pipeline(MODEL_ID)
+
+    # Generate protein sequences
+    sequences = generate_sequences(protgpt2)
+    for seq in sequences:
+        print(seq)
+
+    # Per-sequence perplexity
+    for seq in sequences:
+        print(
+            calculate_perplexity(
+                protgpt2.model, protgpt2.tokenizer, seq["generated_text"], EVAL_DEVICE
+            )
+        )
+
+    # Batch perplexity — set pad token to EOS before batching
+    protgpt2.tokenizer.pad_token = protgpt2.tokenizer.eos_token
+    sequence_texts = [seq["generated_text"] for seq in sequences]
+    print(
+        f"Perplexity scores: "
+        f"{calculate_batch_perplexity(sequence_texts, protgpt2.model, protgpt2.tokenizer)}"
+    )
+
+
+if __name__ == "__main__":
+    main()

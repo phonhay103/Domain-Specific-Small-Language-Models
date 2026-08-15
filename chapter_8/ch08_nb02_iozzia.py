@@ -1,89 +1,134 @@
-# ==========================================
-# Extracted from CH08_NB02_Iozzia.ipynb
-# ==========================================
+"""Antibody Generation with AntibodyGPT.
 
-# ------------------------------------------------------------
-# # Antibody Generation with AntibodyGPT
-# This notebook is a companion of chapter 8 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook is to generate antibody sequences using the [AntibodyGPT](https://huggingface.co/AntibodyGeneration/fine-tuned-progen2-small) model. It requires hardware acceleration.  
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+Companion script for Chapter 8 of "Domain Specific LLMs in Action"
+(Guglielmo Iozzia, Manning Publications, 2024).
 
-# ------------------------------------------------------------
-# Downgrading the HF's Transformers library to ensure compatibility with the AntibodyGPT2's `ProGenForCausalLM` class, as it inherits from `PreTrainedModel`, which, starting from Transformers release 4.50, wouldn't inherit from `GenerationMixin` anymore, in so loosing the availability of the `generate` method.
-# ------------------------------------------------------------
+Generates antibody sequences for a target antigen using the AntibodyGPT model
+(AntibodyGeneration/fine-tuned-progen2-small). Requires hardware acceleration.
 
-# !pip install transformers==4.49.0
+Setup notes:
+  # Downgrade HF Transformers for compatibility with ProGenForCausalLM.
+  # ProGenForCausalLM inherits from PreTrainedModel; starting from Transformers
+  # 4.50 it no longer inherits from GenerationMixin, losing the generate() method.
+  # pip install transformers==4.49.0
+  #
+  # Clone the official repo first:
+  # git clone https://github.com/joethequant/docker_protein_generator.git
+  # Then run this script from inside docker_protein_generator/.
+"""
 
-# ------------------------------------------------------------
-# Clone the official repo.
-# ------------------------------------------------------------
+# stdlib
+from pathlib import Path
 
-# !git clone https://github.com/joethequant/docker_protein_generator.git
-# %cd ./docker_protein_generator/
-
-# ------------------------------------------------------------
-# Download one of the pretrained models and the associated tokenizer from the HF's Hub. Please note that the AutoClass to use is the custom ```ProGenForCausalLM``` available in the ```docker_protein_generator``` cloned repo.
-# 
-# ------------------------------------------------------------
-
-from models.progen.modeling_progen import ProGenForCausalLM
+# third-party
 import torch
 from tokenizers import Tokenizer
 
-model_path = 'AntibodyGeneration/fine-tuned-progen2-small'
+from models.progen.modeling_progen import ProGenForCausalLM  # from cloned repo
 
-model = ProGenForCausalLM.from_pretrained(model_path)
-tokenizer = Tokenizer.from_pretrained(model_path)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MODEL_ID: str = "AntibodyGeneration/fine-tuned-progen2-small"
+LOCAL_MODEL_DIR: Path = Path("antibodygen")
 
-from pathlib import Path
+# Target antigen sequence to generate antibodies for
+TARGET_SEQUENCE: str = (
+    "MQIPQAPWPVVWAVLQLGWRPGWFLDSPDRPWNPPTFSPALLVVTEGDNATFTCSFSNTSESFVLNWYRMSPSNQTDKLAAFPEDR"
+    "SQPGQDCRFRVTQLPNGRDFHMSVVRARRNDSGTYLCGAISLAPKAQIKESLRAELRVTERRAEVPTAHPSPSPRPAGQFQTLVVGV"
+    "VGGLLGSLVLLVWVLAVICSRAARGTIGARRTGQPLKEDPSAVPVFSVDYGELDFQWREKTPEPPVPCVPEQTEYATIVFPSGMGTS"
+    "SPARRGSADGPRSAQPLRPEDGHCSWPL"
+)
 
-models_path = Path("antibodygen")
-model.save_pretrained(models_path)
+NUMBER_OF_SEQUENCES: int = 2
+MAX_GENERATION_LENGTH: int = 1024
+TOP_P: float = 0.9
+TEMPERATURE: float = 0.8
 
-# ------------------------------------------------------------
-# The save model to disk is 588.6 MB (617 MB in memory after download).
-# ------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Define a target antigen sequence and the number of antibody sequences you want to generate for it and then start the generation process.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Functions
+# ---------------------------------------------------------------------------
 
-target_sequence = 'MQIPQAPWPVVWAVLQLGWRPGWFLDSPDRPWNPPTFSPALLVVTEGDNATFTCSFSNTSESFVLNWYRMSPSNQTDKLAAFPEDRSQPGQDCRFRVTQLPNGRDFHMSVVRARRNDSGTYLCGAISLAPKAQIKESLRAELRVTERRAEVPTAHPSPSPRPAGQFQTLVVGVVGGLLGSLVLLVWVLAVICSRAARGTIGARRTGQPLKEDPSAVPVFSVDYGELDFQWREKTPEPPVPCVPEQTEYATIVFPSGMGTSSPARRGSADGPRSAQPLRPEDGHCSWPL'
-number_of_sequences = 2
+def load_model_and_tokenizer(
+    model_id: str,
+    local_dir: Path,
+) -> tuple[ProGenForCausalLM, Tokenizer]:
+    """Download (or load) the AntibodyGPT model and tokenizer.
 
-# ------------------------------------------------------------
-# Tokenize the prompt sequence and then convert it to PyTorch tensor and move it to the GPU.
-# ------------------------------------------------------------
+    Saves the model locally to *local_dir* on first run (~588 MB on disk).
+    """
+    model = ProGenForCausalLM.from_pretrained(model_id)
+    tokenizer = Tokenizer.from_pretrained(model_id)
+    model.save_pretrained(local_dir)
+    return model, tokenizer
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-tokenized_sequence = tokenizer.encode(target_sequence)
-input_tensor = torch.tensor([tokenized_sequence.ids]).to(device)
 
-# ------------------------------------------------------------
-# Move the model to GPU.
-# ------------------------------------------------------------
+def generate_antibody_sequences(
+    model: ProGenForCausalLM,
+    tokenizer: Tokenizer,
+    target_sequence: str,
+    num_sequences: int,
+    max_length: int,
+    top_p: float,
+    temperature: float,
+) -> list[str]:
+    """Generate antibody sequences conditioned on *target_sequence*.
 
-model = model.to(device)
+    Tokenises the antigen sequence, moves tensors to the available device,
+    runs greedy-with-sampling decoding, then decodes and cleans the outputs.
+    """
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# ------------------------------------------------------------
-# Start the sequence generation.
-# ------------------------------------------------------------
+    tokenized = tokenizer.encode(target_sequence)
+    input_tensor = torch.tensor([tokenized.ids]).to(device)
 
-with torch.no_grad():
-    output = model.generate(input_tensor, max_length=1024,
-                            pad_token_id=tokenizer.encode('<|pad|>').ids[0],
-	                          do_sample=True, top_p=0.9, temperature=0.8,
-	                          num_return_sequences=number_of_sequences)
+    model = model.to(device)
 
-# ------------------------------------------------------------
-# Decode the generated sequences and display them.
-# ------------------------------------------------------------
+    pad_id = tokenizer.encode("<|pad|>").ids[0]
 
-as_lists = lambda batch: [batch[i, ...].detach().cpu().numpy().tolist() for i in range(batch.shape[0])]
-sequences = tokenizer.decode_batch(as_lists(output))
-if len(sequences) > 0:
-    sequences = [x.replace('2', '') for x in sequences]
+    with torch.no_grad():
+        output = model.generate(
+            input_tensor,
+            max_length=max_length,
+            pad_token_id=pad_id,
+            do_sample=True,
+            top_p=top_p,
+            temperature=temperature,
+            num_return_sequences=num_sequences,
+        )
 
-sequences
+    # Convert output tensor to nested Python lists for batch decoding
+    as_lists = lambda batch: [
+        batch[i, ...].detach().cpu().numpy().tolist() for i in range(batch.shape[0])
+    ]
+    sequences = tokenizer.decode_batch(as_lists(output))
 
+    # Remove padding/special token artifacts
+    if sequences:
+        sequences = [seq.replace("2", "") for seq in sequences]
+
+    return sequences
+
+
+def main() -> None:
+    """Orchestrate model loading, generation, and result display."""
+    model, tokenizer = load_model_and_tokenizer(MODEL_ID, LOCAL_MODEL_DIR)
+
+    sequences = generate_antibody_sequences(
+        model=model,
+        tokenizer=tokenizer,
+        target_sequence=TARGET_SEQUENCE,
+        num_sequences=NUMBER_OF_SEQUENCES,
+        max_length=MAX_GENERATION_LENGTH,
+        top_p=TOP_P,
+        temperature=TEMPERATURE,
+    )
+
+    print(f"Generated {len(sequences)} antibody sequence(s):")
+    for i, seq in enumerate(sequences, 1):
+        print(f"\n[{i}] {seq}")
+
+
+if __name__ == "__main__":
+    main()

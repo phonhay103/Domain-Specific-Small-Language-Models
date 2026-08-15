@@ -1,60 +1,36 @@
-# ==========================================
-# Extracted from CH04_NB01_Iozzia.ipynb
-# ==========================================
+"""GPT-Neo inference with the HF's Transformers Library.
 
-# ------------------------------------------------------------
-# # GPT-Neo inference with the HF's Transformers Library
-# This notebook is a companion of chapter 4 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook is to introduce readers to the inference (text generation) with the [GPT-Neo model](https://github.com/EleutherAI/gpt-neo) using the Hugging Face's [Transformers library](https://github.com/huggingface/transformers). It can be executed in the Colab free tier with hardware acceleration (GPU).  
-# More details about the code can be found in the book's chapter.
-# ------------------------------------------------------------
+This script is a companion of chapter 4 of the "Domain Specific LLMs in Action"
+book, author Guglielmo Iozzia, Manning Publications, 2024.
+The code introduces readers to inference (text generation) with the GPT-Neo model
+using the Hugging Face Transformers library. It can be executed with hardware
+acceleration (GPU).
+More details about the code can be found in the book's chapter.
 
-# ------------------------------------------------------------
-# Install the missing requirements in the Colab VM (HF's Accelerate only).
-# ------------------------------------------------------------
+# Install the missing requirements before running (HF's Accelerate only):
+#   pip install accelerate
+"""
 
-# !pip install accelerate
+import time
 
-# ------------------------------------------------------------
-# Download the GPT-Neo 2.7B model and the associated tokenizer from the HF's Hub. The model is loaded in full precision and is then loaded into the GPU.
-# ------------------------------------------------------------
-
+import numpy as np
 import torch
-from transformers import GPTNeoForCausalLM, GPT2Tokenizer
+from transformers import GPT2Tokenizer, GPTNeoForCausalLM
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MODEL_ID = "EleutherAI/gpt-neo-2.7B"
+PAD_TOKEN_ID = 50256
+TEMPERATURE = 0.9
+MAX_LENGTH = 200
+MAX_LENGTH_LONG = 300
+BENCHMARK_RUNS = 20
+BENCHMARK_RUNS_TOTAL = 21
 
-model_id = "EleutherAI/gpt-neo-2.7B"
-tokenizer = GPT2Tokenizer.from_pretrained(model_id)
-model = GPTNeoForCausalLM.from_pretrained(model_id, device_map="auto")
-model.to(device)
+COMPLETION_PROMPT = "The story so far: in the beginning, the universe was created."
 
-# ------------------------------------------------------------
-# Verify where the model layers have been loaded (all in the GPU memory or also RAM and/or disk).
-# ------------------------------------------------------------
-
-model.hf_device_map
-
-# ------------------------------------------------------------
-# Perform standard inference (text completion).
-# ------------------------------------------------------------
-
-prompt = "The story so far: in the beginning, the universe was created."
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-
-generated_ids = model.generate(input_ids,
-                               do_sample=True,
-                               temperature=0.9,
-                               max_length=200,
-                               pad_token_id=50256)
-generated_text = tokenizer.decode(generated_ids[0])
-print(generated_text)
-
-# ------------------------------------------------------------
-# Do few-shot text classification (the model can generalize learning from few new and unseen examples.
-# ------------------------------------------------------------
-
-prompt = """
+FEW_SHOT_PROMPT = """
 Sentence: This movie is very nice.
 Sentiment: positive
 
@@ -73,100 +49,163 @@ Sentiment: positive
 Sentence: This movie could have been better.
 Sentiment: neutral
 """
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
 
-generated_ids = model.generate(input_ids,
-                               do_sample=True,
-                               temperature=0.9,
-                               max_length=200,
-                               pad_token_id=50256)
-generated_text = tokenizer.decode(generated_ids[0])
-print(generated_text)
+CODE_GEN_PROMPT = (
+    "Instruction: Generate a Python function that lets you reverse a list of integers.\n\n"
+    "Answer: "
+)
 
-# ------------------------------------------------------------
-# Do Python code generation.
-# ------------------------------------------------------------
+BATCH_TEXTS = [
+    "Once there was a man ",
+    "The weather today will be ",
+    "A great soccer player must ",
+]
 
-prompt = """Instruction: Generate a Python function that lets you reverse a list of integers.
 
-Answer: """
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+def load_model(model_id: str, device: torch.device) -> tuple[GPTNeoForCausalLM, GPT2Tokenizer]:
+    """Download and load GPT-Neo model and tokenizer from the HF Hub."""
+    tokenizer = GPT2Tokenizer.from_pretrained(model_id)
+    model = GPTNeoForCausalLM.from_pretrained(model_id, device_map="auto")
+    model.to(device)
+    return model, tokenizer
 
-generated_ids = model.generate(input_ids,
-                               do_sample=True,
-                               temperature=0.9,
-                               max_length=200,
-                               pad_token_id=50256
-                               )
-generated_text = tokenizer.decode(generated_ids[0])
-print(generated_text)
 
-# ------------------------------------------------------------
-# Do batch text completion.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Inference helpers
+# ---------------------------------------------------------------------------
+def generate_text(
+    model: GPTNeoForCausalLM,
+    tokenizer: GPT2Tokenizer,
+    prompt: str,
+    device: torch.device,
+    max_length: int = MAX_LENGTH,
+) -> str:
+    """Run single-prompt text generation and return decoded output."""
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    generated_ids = model.generate(
+        input_ids,
+        do_sample=True,
+        temperature=TEMPERATURE,
+        max_length=max_length,
+        pad_token_id=PAD_TOKEN_ID,
+    )
+    return tokenizer.decode(generated_ids[0])
 
-texts = ["Once there was a man ", "The weather today will be ", "A great soccer player must "]
 
-tokenizer.padding_side = "left"
-tokenizer.pad_token = tokenizer.eos_token
-encoding = tokenizer(texts, padding=True, return_tensors='pt').to(device)
-with torch.no_grad():
-    generated_ids = model.generate(**encoding,
-                                   do_sample=True,
-                                   temperature=0.9,
-                                   max_length=50,
-                                   pad_token_id=50256)
-generated_texts = tokenizer.batch_decode(
-    generated_ids, skip_special_tokens=True)
+def run_batch_completion(
+    model: GPTNeoForCausalLM,
+    tokenizer: GPT2Tokenizer,
+    texts: list[str],
+    device: torch.device,
+    max_length: int = 50,
+) -> list[str]:
+    """Run batch text completion and return decoded outputs."""
+    tokenizer.padding_side = "left"
+    tokenizer.pad_token = tokenizer.eos_token
+    encoding = tokenizer(texts, padding=True, return_tensors="pt").to(device)
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **encoding,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            max_length=max_length,
+            pad_token_id=PAD_TOKEN_ID,
+        )
+    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
-for text in generated_texts:
-  print("---------")
-  print(text)
 
-# ------------------------------------------------------------
-# Benchmarking the model on text completion: comparing the cases where the KV cache is used to those where it isn't.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Benchmarking
+# ---------------------------------------------------------------------------
+def benchmark_kv_cache(
+    model: GPTNeoForCausalLM,
+    tokenizer: GPT2Tokenizer,
+    prompt: str,
+    device: torch.device,
+    runs: int = BENCHMARK_RUNS,
+) -> None:
+    """Compare generation time with and without the KV cache."""
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    for use_cache in (True, False):
+        times = []
+        for _ in range(runs):
+            start = time.time()
+            model.generate(
+                input_ids,
+                do_sample=True,
+                temperature=TEMPERATURE,
+                max_length=MAX_LENGTH,
+                pad_token_id=PAD_TOKEN_ID,
+                use_cache=use_cache,
+            )
+            times.append(time.time() - start)
+        label = "Using" if use_cache else "No"
+        print(f"{label} KV cache: {round(np.mean(times), 3)} +- {round(np.std(times), 3)} seconds")
 
-import time
-import numpy as np
 
-prompt = "The story so far: in the beginning, the universe was created."
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+def benchmark_total_generation(
+    model: GPTNeoForCausalLM,
+    tokenizer: GPT2Tokenizer,
+    prompt: str,
+    device: torch.device,
+    max_length: int = MAX_LENGTH_LONG,
+    runs: int = BENCHMARK_RUNS_TOTAL,
+) -> None:
+    """Benchmark total generation time, discarding the first (warm-up) run."""
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    times = []
+    for _ in range(runs):
+        start = time.time()
+        model.generate(
+            input_ids,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            max_length=max_length,
+            pad_token_id=PAD_TOKEN_ID,
+        )
+        times.append(time.time() - start)
+    print(
+        f"Average Total Generation time: "
+        f"{round(np.mean(times[1:]), 3)} +- {round(np.std(times[1:]), 3)} seconds"
+    )
 
-for use_cache in (True, False):
-  times = []
-  for _ in range(20):
-    start = time.time()
-    generated_ids = model.generate(input_ids,
-                                  do_sample=True,
-                                  temperature=0.9,
-                                  max_length=200,
-                                  pad_token_id=50256,
-                                  use_cache=use_cache)
-    times.append(time.time() - start)
-  print(f"{'Using' if use_cache else 'No'} KV cache: {round(np.mean(times), 3)} +- {round(np.std(times), 3)} seconds")
 
-# ------------------------------------------------------------
-# Benchmarking the model's total generation time.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Orchestrate all GPT-Neo inference and benchmarking demonstrations."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-import time
-import numpy as np
+    model, tokenizer = load_model(MODEL_ID, device)
 
-prompt = "The story so far: in the beginning, the universe was created."
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    # Verify where each model layer was loaded (GPU, RAM, or disk)
+    print("HF device map:", model.hf_device_map)
 
-max_length = 300
-times = []
-inference_runs = 21
-for _ in range(inference_runs):
-  start = time.time()
-  generated_ids = model.generate(input_ids,
-                                do_sample=True,
-                                temperature=0.9,
-                                max_length=max_length,
-                                pad_token_id=50256,
-                                )
-  times.append(time.time() - start)
-print(f"Average Total Generation time: {round(np.mean(times[1:]), 3)} +- {round(np.std(times[1:]), 3)} seconds")
+    # Standard text completion
+    print(generate_text(model, tokenizer, COMPLETION_PROMPT, device))
 
+    # Few-shot sentiment classification
+    print(generate_text(model, tokenizer, FEW_SHOT_PROMPT, device))
+
+    # Python code generation
+    print(generate_text(model, tokenizer, CODE_GEN_PROMPT, device))
+
+    # Batch text completion
+    batch_outputs = run_batch_completion(model, tokenizer, BATCH_TEXTS, device)
+    for text in batch_outputs:
+        print("---------")
+        print(text)
+
+    # Benchmarking: KV cache vs. no KV cache
+    benchmark_kv_cache(model, tokenizer, COMPLETION_PROMPT, device)
+
+    # Benchmarking: total generation time
+    benchmark_total_generation(model, tokenizer, COMPLETION_PROMPT, device)
+
+
+if __name__ == "__main__":
+    main()

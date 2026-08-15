@@ -1,251 +1,222 @@
-# ==========================================
-# Extracted from CH03_NB01_Iozzia.ipynb
-# ==========================================
+"""Fine-tune GPT-2 Small to generate Manim Python animation code.
 
-# ------------------------------------------------------------
-# # End-to-End Small Language Model Fine Tuning to Generate Manim Code
-# This notebook is a companion of chapter 3 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook is about fine tuning a small language model, [GPT-2 small](https://huggingface.co/openai-community/gpt2) to generate Python [Manim](https://github.com/ManimCommunity/manim) code. Hardware acceleration (GPU) is needed.  
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+Companion script for Chapter 3 of "Domain Specific LLMs in Action"
+by Guglielmo Iozzia, Manning Publications, 2024.
 
-# ------------------------------------------------------------
-# Install the missing dependencies in the Colab VM (only Optuna for hyperparameter search isn't available by default).
-# ------------------------------------------------------------
+Uses Optuna-backed hyperparameter search via HF Trainer, followed by a
+full training run with the best found hyperparameters. Inference is
+evaluated by writing generated Manim snippets to a CSV file.
+A GPU is required.
 
+# Install missing requirements first (Colab / fresh env):
 # !pip install optuna
+"""
 
-# ------------------------------------------------------------
-# ### Data Preparation
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Standard library
+# ---------------------------------------------------------------------------
+from __future__ import annotations
+import csv
 
-# ------------------------------------------------------------
-# Download the [Manim_Python dataset](https://huggingface.co/datasets/Edoh/manim_python) from the Hugging Face's Hub.
-# ------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Third-party
+# ---------------------------------------------------------------------------
+import torch
 from datasets import load_dataset
+from transformers import (
+    DataCollatorForLanguageModeling,
+    EarlyStoppingCallback,
+    GPT2LMHeadModel,
+    GPT2Tokenizer,
+    Trainer,
+    TrainingArguments,
+)
 
-dataset = load_dataset("Edoh/manim_python")
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+DATASET_NAME = "Edoh/manim_python"
+MODEL_NAME = "openai-community/gpt2"
+OUTPUT_DIR = "./gpt2-manim-python-finetuned"
+OUTPUT_CSV = "gpt2_manim_python_test_outputs.csv"
 
-# ------------------------------------------------------------
-# Display some training sample.
-# ------------------------------------------------------------
+# Training
+EVAL_STRATEGY = "epoch"
+SAVE_STRATEGY = "epoch"
+LOGGING_STEPS = 100
+SAVE_TOTAL_LIMIT = 2
+EARLY_STOPPING_PATIENCE = 2
+VALIDATION_SPLIT = 0.1
+MAX_TOKENIZED_LENGTH = 512
 
-print(dataset["train"][0])
+# Hyperparameter search (Optuna)
+HP_TRIALS = 3
+HP_LR_MIN = 1e-5
+HP_LR_MAX = 5e-4
+HP_BATCH_SIZES = [2, 4, 8]
+HP_WEIGHT_DECAY_MAX = 0.3
+HP_EPOCHS_MIN = 3
+HP_EPOCHS_MAX = 6
+HP_WARMUP_MAX = 500
+HP_GRAD_ACCUM_CHOICES = [1, 2, 4]
 
-# ------------------------------------------------------------
-# Download the GPT2 Small model's tokenizer.
-# ------------------------------------------------------------
+# Inference / generation
+GEN_MAX_LENGTH = 150
+GEN_NUM_BEAMS = 5
+GEN_TEMPERATURE = 0.7
+GEN_TOP_P = 0.9
+GEN_REPETITION_PENALTY = 1.2
+GEN_NO_REPEAT_NGRAM_SIZE = 2
 
-from transformers import GPT2Tokenizer
 
-model_name = "openai-community/gpt2"
-tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+# ---------------------------------------------------------------------------
+# Data preparation
+# ---------------------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Set pad token to eos token for the model's tokenizer.
-# ------------------------------------------------------------
+def load_and_tokenise_dataset(tokenizer: GPT2Tokenizer):
+    """Load the Manim dataset, tokenise, and split off a validation set."""
+    dataset = load_dataset(DATASET_NAME)
+    print(dataset["train"][0])
 
-tokenizer.pad_token = tokenizer.eos_token
+    tokenized_datasets = dataset.map(
+        lambda examples: preprocess_data(examples, tokenizer),
+        batched=True,
+        remove_columns=dataset["train"].column_names,
+    )
 
-# ------------------------------------------------------------
-# Define a custom function to preprocess the raw data. It concatenates the `instruction` and `output` columms of the dataset, tokenizes the concatenated text and set the lables same as the input_ids.
-# ------------------------------------------------------------
+    # Reserve 10% of training data for validation
+    train_val_split = tokenized_datasets["train"].train_test_split(test_size=VALIDATION_SPLIT)
+    tokenized_datasets["train"] = train_val_split["train"]
+    tokenized_datasets["validation"] = train_val_split["test"]
 
-def preprocess_data(examples):
+    return dataset, tokenized_datasets
+
+
+def preprocess_data(examples: dict, tokenizer: GPT2Tokenizer) -> dict:
+    """Concatenate instruction/output pairs, tokenise, and set labels == input_ids."""
     inputs = [
         f"Instruction: {instr}\nOutput: {out}"
         for instr, out in zip(examples["instruction"], examples["output"])
     ]
-    tokenized = tokenizer(inputs, truncation=True, max_length=512, padding="max_length")
-
+    tokenized = tokenizer(inputs, truncation=True, max_length=MAX_TOKENIZED_LENGTH, padding="max_length")
     tokenized["labels"] = tokenized["input_ids"].copy()
     return tokenized
 
-# ------------------------------------------------------------
-# Use the `preprocess_data` function to tokenize the training data. The original columns are also removed, as they aren't needed anymore for training purposes.
-# ------------------------------------------------------------
 
-tokenized_datasets = dataset.map(preprocess_data,
-                                 batched=True,
-                                 remove_columns=dataset["train"].column_names)
+# ---------------------------------------------------------------------------
+# Hyperparameter search
+# ---------------------------------------------------------------------------
 
-# ------------------------------------------------------------
-# ### Hyperparameter Tuning
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Import the required classes.
-# ------------------------------------------------------------
-
-from transformers import (
-    GPT2LMHeadModel,
-    Trainer,
-    TrainingArguments,
-    EarlyStoppingCallback,
-)
-
-# ------------------------------------------------------------
-# Define a custom function to init the model during the hyperparameter search. This way we will have a fresh model for each trial. The baseline model weights are pulled from the HF's Hub only during the first trial. Subsequents trials will use the cached weights.
-# ------------------------------------------------------------
-
-def model_init():
-    return GPT2LMHeadModel.from_pretrained(model_name, device_map='auto')
-
-# ------------------------------------------------------------
-# Set the training arguments.
-# ------------------------------------------------------------
-
-training_args = TrainingArguments(
-    output_dir="./gpt2-manim-python-finetuned",
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    logging_strategy="steps",
-    logging_steps=100,
-    save_total_limit=2,
-    load_best_model_at_end=True,
-    metric_for_best_model="eval_loss",
-    greater_is_better=False,
-    fp16=True,
-    report_to="none",
-)
-
-# ------------------------------------------------------------
-# Split the training data, to reserve 10% for validation.
-# ------------------------------------------------------------
-
-train_val_split = tokenized_datasets["train"].train_test_split(test_size=0.1)
-tokenized_datasets["train"] = train_val_split["train"]
-tokenized_datasets["validation"] = train_val_split["test"]
-
-# ------------------------------------------------------------
-# Create an instance of data collator for causal language modeling.
-# ------------------------------------------------------------
-
-from transformers import DataCollatorForLanguageModeling
-
-data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
-# ------------------------------------------------------------
-# Create an instance of Trainer. An early stopping callback is set too.
-# ------------------------------------------------------------
-
-trainer = Trainer(
-    model_init=model_init,
-    args=training_args,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["validation"],
-    tokenizer=tokenizer,
-    data_collator=data_collator,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-)
-
-# ------------------------------------------------------------
-# Define the hyperparameter search space.
-# ------------------------------------------------------------
-
-def hp_space(trial):
+def hp_space(trial) -> dict:
+    """Define the Optuna hyperparameter search space."""
     return {
-        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True),
-        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [2, 4, 8]),
-        "weight_decay": trial.suggest_float("weight_decay", 0.0, 0.3),
-        "num_train_epochs": trial.suggest_int("num_train_epochs", 3, 6),
-        "warmup_steps": trial.suggest_int("warmup_steps", 0, 500),
-        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
+        "learning_rate": trial.suggest_float("learning_rate", HP_LR_MIN, HP_LR_MAX, log=True),
+        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", HP_BATCH_SIZES),
+        "weight_decay": trial.suggest_float("weight_decay", 0.0, HP_WEIGHT_DECAY_MAX),
+        "num_train_epochs": trial.suggest_int("num_train_epochs", HP_EPOCHS_MIN, HP_EPOCHS_MAX),
+        "warmup_steps": trial.suggest_int("warmup_steps", 0, HP_WARMUP_MAX),
+        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", HP_GRAD_ACCUM_CHOICES),
     }
 
-# ------------------------------------------------------------
-# Run the hyperparameter search. The Optuna backend is used.
-# ------------------------------------------------------------
 
-trials_count = 3
-best_run = trainer.hyperparameter_search(
-    direction="minimize",
-    backend="optuna",
-    n_trials=trials_count,
-    hp_space=hp_space,
-    compute_objective=lambda metrics: metrics["eval_loss"],
-)
+def run_hyperparameter_search(training_args: TrainingArguments, tokenized_datasets, tokenizer, data_collator):
+    """Run Optuna hyperparameter search; return the best run."""
 
-# ------------------------------------------------------------
-# Display the best combination of hyperparmaters found.
-# ------------------------------------------------------------
+    def model_init():
+        # A fresh model is created for each trial; subsequent trials use the cached weights.
+        return GPT2LMHeadModel.from_pretrained(MODEL_NAME, device_map="auto")
 
-print("Best hyperparameters found:", best_run.hyperparameters)
+    trainer = Trainer(
+        model_init=model_init,
+        args=training_args,
+        train_dataset=tokenized_datasets["train"],
+        eval_dataset=tokenized_datasets["validation"],
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
+    )
 
-# ------------------------------------------------------------
-# ### Training
-# ------------------------------------------------------------
+    best_run = trainer.hyperparameter_search(
+        direction="minimize",
+        backend="optuna",
+        n_trials=HP_TRIALS,
+        hp_space=hp_space,
+        compute_objective=lambda metrics: metrics["eval_loss"],
+    )
+    print("Best hyperparameters found:", best_run.hyperparameters)
+    return best_run
 
-# ------------------------------------------------------------
-# Configure the Trainer with the best hyperparameters.
-# ------------------------------------------------------------
 
-for key, value in best_run.hyperparameters.items():
-    setattr(training_args, key, value)
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
-trainer = Trainer(
-    model_init=model_init,
-    args=training_args,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets.get("validation"),
-    tokenizer=tokenizer,
-    data_collator=data_collator,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-)
+def train_with_best_hyperparams(best_run, training_args: TrainingArguments, tokenized_datasets, tokenizer, data_collator) -> Trainer:
+    """Apply the best hyperparameters to training_args and train the final model."""
+    for key, value in best_run.hyperparameters.items():
+        setattr(training_args, key, value)
 
-# ------------------------------------------------------------
-# Start the model fine-tuning.
-# ------------------------------------------------------------
+    def model_init():
+        return GPT2LMHeadModel.from_pretrained(MODEL_NAME, device_map="auto")
 
-trainer.train()
+    trainer = Trainer(
+        model_init=model_init,
+        args=training_args,
+        train_dataset=tokenized_datasets["train"],
+        eval_dataset=tokenized_datasets.get("validation"),
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
+    )
+    trainer.train()
 
-# ------------------------------------------------------------
-# Save the fine-tuned model and the tokenizer to disk.
-# ------------------------------------------------------------
+    trainer.save_model(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    return trainer
 
-trainer.save_model("./gpt2-manim-python-finetuned")
-tokenizer.save_pretrained("./gpt2-manim-python-finetuned")
 
-# ------------------------------------------------------------
-# ### Test
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Load the fine-tuned model from disk to GPU memory. Load also its companion tokenizer.
-# ------------------------------------------------------------
+def load_finetuned_model(model_dir: str) -> tuple[GPT2LMHeadModel, GPT2Tokenizer, torch.device]:
+    """Load the fine-tuned model and tokenizer from disk to GPU memory."""
+    tokenizer = GPT2Tokenizer.from_pretrained(model_dir)
+    model = GPT2LMHeadModel.from_pretrained(model_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    return model, tokenizer, device
 
-import torch
 
-model_dir = "./gpt2-manim-python-finetuned"
-tokenizer = GPT2Tokenizer.from_pretrained(model_dir)
-model = GPT2LMHeadModel.from_pretrained(model_dir)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-model.eval()
-
-# ------------------------------------------------------------
-# Define a custom function to do Manim code generation with the fine-tuned model and decode the output.
-# ------------------------------------------------------------
-
-def generate_output(instruction, max_length=150, num_beams=5, temperature=0.7, top_p=0.9, repetition_penalty=1.2):
-    """
-    Generate output text given an instruction using beam search and nucleus sampling.
+def generate_output(
+    instruction: str,
+    model: GPT2LMHeadModel,
+    tokenizer: GPT2Tokenizer,
+    device: torch.device,
+    max_length: int = GEN_MAX_LENGTH,
+    num_beams: int = GEN_NUM_BEAMS,
+    temperature: float = GEN_TEMPERATURE,
+    top_p: float = GEN_TOP_P,
+    repetition_penalty: float = GEN_REPETITION_PENALTY,
+) -> str:
+    """Generate output text given an instruction using beam search and nucleus sampling.
 
     Args:
-        instruction (str): The input instruction prompt.
-        max_length (int): Maximum length of generated sequence (including prompt).
-        num_beams (int): Number of beams for beam search.
-        temperature (float): Sampling temperature; lower is less random.
-        top_p (float): Nucleus sampling probability threshold.
-        repetition_penalty (float): Penalty for repeated tokens (>1.0 discourages repetition).
+        instruction: The input instruction prompt.
+        model: Fine-tuned GPT-2 model.
+        tokenizer: Companion tokenizer.
+        device: Torch device to run inference on.
+        max_length: Maximum length of generated sequence (including prompt).
+        num_beams: Number of beams for beam search.
+        temperature: Sampling temperature; lower is less random.
+        top_p: Nucleus sampling probability threshold.
+        repetition_penalty: Penalty for repeated tokens (>1.0 discourages repetition).
 
     Returns:
-        str: Generated output text.
+        Generated output text (the portion after "Output:").
     """
-
     prompt = f"Instruction: {instruction}\nOutput:"
-
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
 
     generated_ids = model.generate(
@@ -259,41 +230,71 @@ def generate_output(instruction, max_length=150, num_beams=5, temperature=0.7, t
         pad_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id,
         early_stopping=True,
-        no_repeat_ngram_size=2,
+        no_repeat_ngram_size=GEN_NO_REPEAT_NGRAM_SIZE,
     )
 
     generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-
     output_start = generated_text.find("Output:")
     if output_start != -1:
-        output_text = generated_text[output_start + len("Output:"):].strip()
-    else:
-        output_text = generated_text.strip()
+        return generated_text[output_start + len("Output:"):].strip()
+    return generated_text.strip()
 
-    return output_text
 
-# ------------------------------------------------------------
-# Execute the fine-tuned model on all the samples in the test set and save the generated Manim code snippets (along with the corresponding prompt and ground truth) in a CSV file.
-# ------------------------------------------------------------
+def run_inference_on_test_set(dataset, model, tokenizer, device) -> None:
+    """Run the fine-tuned model on every test sample and write results to CSV."""
+    with open(OUTPUT_CSV, mode="w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(
+            csvfile,
+            fieldnames=["instruction", "reference_output", "generated_output"],
+        )
+        writer.writeheader()
 
-import csv
+        for example in dataset["test"]:
+            instruction = example["instruction"]
+            reference_output = example["output"]
+            generated = generate_output(instruction, model, tokenizer, device)
+            writer.writerow({
+                "instruction": instruction,
+                "reference_output": reference_output,
+                "generated_output": generated,
+            })
 
-output_csv = "gpt2_manim_python_test_outputs.csv"
-with open(output_csv, mode="w", newline="", encoding="utf-8") as csvfile:
-    writer = csv.DictWriter(csvfile, fieldnames=["instruction", "reference_output", "generated_output"])
-    writer.writeheader()
+    print(f"Inference complete. Results saved to {OUTPUT_CSV}")
 
-    for example in dataset['test']:
-        instruction = example["instruction"]
-        reference_output = example["output"]
 
-        generated_output = generate_output(instruction)
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
-        writer.writerow({
-            "instruction": instruction,
-            "reference_output": reference_output,
-            "generated_output": generated_output,
-        })
+def main() -> None:
+    """End-to-end pipeline: data prep → HP search → training → inference."""
+    tokenizer = GPT2Tokenizer.from_pretrained(MODEL_NAME)
+    tokenizer.pad_token = tokenizer.eos_token  # Required: GPT-2 has no dedicated pad token
 
-print(f"Inference complete. Results saved to {output_csv}")
+    raw_dataset, tokenized_datasets = load_and_tokenise_dataset(tokenizer)
 
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+    training_args = TrainingArguments(
+        output_dir=OUTPUT_DIR,
+        eval_strategy=EVAL_STRATEGY,
+        save_strategy=SAVE_STRATEGY,
+        logging_strategy="steps",
+        logging_steps=LOGGING_STEPS,
+        save_total_limit=SAVE_TOTAL_LIMIT,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        fp16=True,
+        report_to="none",
+    )
+
+    best_run = run_hyperparameter_search(training_args, tokenized_datasets, tokenizer, data_collator)
+    train_with_best_hyperparams(best_run, training_args, tokenized_datasets, tokenizer, data_collator)
+
+    model, inf_tokenizer, device = load_finetuned_model(OUTPUT_DIR)
+    run_inference_on_test_set(raw_dataset, model, inf_tokenizer, device)
+
+
+if __name__ == "__main__":
+    main()

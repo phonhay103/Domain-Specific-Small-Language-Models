@@ -1,32 +1,33 @@
-# ==========================================
-# Extracted from CH13_NB02_Iozzia.ipynb
-# ==========================================
+"""
+Implementing an AI Agent with SmolAgents.
 
-# ------------------------------------------------------------
-# # Implementing an AI Agent with SmolAgents
-# This notebook is a companion of chapter 13 of the "Small Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2025.  
-# The code in this notebook is about implementing a basic AI Agent using the Hugging Face's [SmolAgents](https://github.com/huggingface/smolagents) framework and Small Language Models (SLMs). Execution of the code cells in this notebook requires hardware acceleration.   
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+Companion script for chapter 13 of "Domain-Specific Small Language Models"
+by Guglielmo Iozzia, Manning Publications, 2025.
 
-# ------------------------------------------------------------
-# Install the missing requirements (only SmolAgents missing in the Colab VM).
-# ------------------------------------------------------------
+Implements a basic AI Agent using Hugging Face's SmolAgents framework
+and Small Language Models (SLMs). Requires hardware acceleration.
 
-# !pip install smolagents
+# Install the missing requirement before running:
+# pip install smolagents
+"""
 
-# ------------------------------------------------------------
-# Import the required packages and classes.
-# ------------------------------------------------------------
+import random
+import re
 
 import torch
 from smolagents import CodeAgent, TransformersModel, tool
 
-# ------------------------------------------------------------
-# Because this notebook is for learning purposes only, let's define a mock webpage containing a list of flights, to prevent the agent running longer queries across the web.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-mock_flights_web_page = """
+MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+MAX_NEW_TOKENS = 1000
+AGENT_MAX_STEPS = 3
+USER_TASK = "Find a flight from Dublin to New York and then select a seat."
+
+# Mock webpage — prevents the agent from running longer queries across the web
+MOCK_FLIGHTS_WEB_PAGE = """
 1. Flight DUB-BOS123
 - Price: $350
 - Origin: Dublin Airport (DUB)
@@ -76,145 +77,109 @@ mock_flights_web_page = """
 - Date: January 10, 2025
 """
 
-# ------------------------------------------------------------
-# Let's implement the first custom tool for the agent. We achieve this by defining a function, to be decorated with the `@tool` decorator, that can extract from a web page a list of flights that match a given origin and destination pair on a given date. Please note that SmolAgents, for any tool implemented this way, requires type hints for inputs and outputs and docstrings that explain what the function does and what the arguments and return values are.
-# ------------------------------------------------------------
+FLIGHT_PATTERN = re.compile(
+    r"Flight\s([A-Z]*-[A-Z]*[0-9]*)"
+    r"- Price:\s+\$(\d+)"
+    r"- Origin:\s+(.*?)"
+    r"- Destination:\s+(.*?)"
+    r"- Date:\s+([a-zA-Z]+\s[0-9]+,\s[0-9]+)"
+)
 
-import re
+# ---------------------------------------------------------------------------
+# Agent tools
+# ---------------------------------------------------------------------------
 
 @tool
 def search_for_flights(origin: str, destination: str, date: str, web_page: str) -> str:
-  """Searches for flights based on origin, destination, and date.
+    """Searches for flights based on origin, destination, and date.
 
-  Args:
-    origin: The origin airport code.
-    destination: The destination airport code.
-    date: The travel date.
-    web_page: The webpage content to search for flights.
+    Args:
+        origin: The origin airport code.
+        destination: The destination airport code.
+        date: The travel date.
+        web_page: The webpage content to search for flights.
 
-  Returns:
-    The flight code of the matching flight.
-  """
+    Returns:
+        The flight code of the matching flight.
+    """
+    origin = origin.lower()
+    destination = destination.lower()
 
-  origin = origin.lower()
-  destination = destination.lower()
+    # Always use the local mock page — for learning purposes only
+    web_page = MOCK_FLIGHTS_WEB_PAGE
+    flights = web_page.strip().split('\n\n')
+    matching_flights = []
 
-  web_page = mock_flights_web_page
-  flights = web_page.strip().split('\n\n')
-  matching_flights = []
+    for flight in flights:
+        flight = flight.replace('\n', '')
+        match = FLIGHT_PATTERN.search(flight)
+        if match:
+            flight_code = match.group(1)
+            price = match.group(2)
+            flight_origin = match.group(3).lower()
+            flight_destination = match.group(4).lower()
+            flight_date = match.group(5)
 
-  matching_pattern = r"Flight\s([A-Z]*-[A-Z]*[0-9]*)- Price:\s+\$(\d+)- Origin:\s+(.*?)- Destination:\s+(.*?)- Date:\s+([a-zA-Z]+\s[0-9]+,\s[0-9]+)"
-  flight_pattern = re.compile(
-      matching_pattern
-      )
+            if origin in flight_origin and destination in flight_destination:
+                matching_flights.append({
+                    "Flight Code": flight_code,
+                    "Price": price,
+                    "Origin": flight_origin,
+                    "Destination": flight_destination,
+                    "Date": flight_date,
+                })
 
-  for flight in flights:
-      flight = flight.replace('\n', '')
-      match = flight_pattern.search(flight)
-      if match:
-          flight_code = match.group(1)
-          price = match.group(2)
-          flight_origin = match.group(3).lower()
-          flight_destination = match.group(4).lower()
-          flight_date = match.group(5)
+    return matching_flights
 
-          if origin in flight_origin and destination in flight_destination:
-              matching_flights.append({
-                  "Flight Code": flight_code,
-                  "Price": price,
-                  "Origin": flight_origin,
-                  "Destination": flight_destination,
-                  "Date": flight_date
-              })
-
-  return matching_flights
-
-# ------------------------------------------------------------
-# The code cell below is to test the tool to search for flights. Execution isn't mandatory to run the agent.
-# ------------------------------------------------------------
-
-matching_flight = search_for_flights('DUB', 'JFK', '2023-03-15', mock_flights_web_page)
-matching_flight
-
-# ------------------------------------------------------------
-# Define a function (tool) to find a seat within a given flight and class (Economy or Business).
-# ------------------------------------------------------------
-
-import random
 
 @tool
-def find_seat(flight: str, seat_class: str='economy') -> str:
-  """Finds a seat within a given flight.
+def find_seat(flight: str, seat_class: str = 'economy') -> str:
+    """Finds a seat within a given flight.
 
-  Args:
-    flight: The flight code.
-    seat_class: The desired seat class.
+    Args:
+        flight: The flight code.
+        seat_class: The desired seat class ('economy' or 'business').
 
-  Returns:
-    The seat number.
-  """
-
-  if seat_class.lower() not in ['business', 'economy']:
+    Returns:
+        The seat number.
+    """
+    if seat_class.lower() not in ['business', 'economy']:
         raise ValueError("ticket_type must be either 'business' or 'economy'")
 
-  seat_type = random.choice(['A', 'B', 'C', 'D', 'E', 'F'])
+    seat_type = random.choice(['A', 'B', 'C', 'D', 'E', 'F'])
 
-  if seat_class.lower() == 'business':
+    if seat_class.lower() == 'business':
         seat_number = random.randint(1, 3)
-  else:
-      seat_number = random.randint(4, 32)
+    else:
+        seat_number = random.randint(4, 32)
 
-  selected_seat = f"{seat_type}{seat_number}"
+    return f"{seat_type}{seat_number}"
 
-  return selected_seat
-
-# ------------------------------------------------------------
-# The code cell below is to test the tool to find a seat for a given flight. Execution isn't mandatory to run the agent.
-# ------------------------------------------------------------
-
-selected_seat = find_seat('SFO-ANC123', 'Economy')
-selected_seat
-
-# ------------------------------------------------------------
-# Define a function (tool) to find book a ticket for a given flight and seat.
-# ------------------------------------------------------------
 
 @tool
 def book_flight_ticket(flight: str, seat: str) -> str:
-  """Books a flight ticket.
+    """Books a flight ticket.
 
-  Args:
-    flight: The flight code.
-    seat: The seat number.
+    Args:
+        flight: The flight code.
+        seat: The seat number.
 
-  Returns:
-    The ticket number.
-  """
-  ticket_number = random.randint(100000, 999999)
+    Returns:
+        The ticket number.
+    """
+    ticket_number = random.randint(100000, 999999)
+    return f"Ticket booked for flight {flight} and seat {seat}. Ticket number: {ticket_number}"
 
-  return f"Ticket booked for flight {flight} and seat {seat}. Ticket number: {ticket_number}"
-
-# ------------------------------------------------------------
-# The code cell below is to test the tool to book a flight ticket. Execution isn't mandatory to run the agent.
-# ------------------------------------------------------------
-
-booking = book_flight_ticket('DUB-JFK789', 'A1')
-booking
-
-# ------------------------------------------------------------
-# Define a function (tool) to calculate the n-th Fibonacci number.
-# ------------------------------------------------------------
 
 @tool
 def fibonacci(n: int) -> int:
-    """
-    Calculates the n-th Fibonacci number.
+    """Calculates the n-th Fibonacci number.
 
     Args:
-      n: The sequence starting number.
+        n: The sequence starting number.
 
     Returns:
-      The n-th number in the sequence.
+        The n-th number in the sequence.
     """
     if n < 0:
         raise ValueError("Negative arguments are not supported")
@@ -228,35 +193,47 @@ def fibonacci(n: int) -> int:
         a, b = b, a + b
     return b
 
-# ------------------------------------------------------------
-# The code cell below is to test the tool to calculate the n-th Fibonacci number. Execution isn't mandatory to run the agent.
-# ------------------------------------------------------------
 
-n = 10
-print(f"The {n}-th Fibonacci number is: {fibonacci(n)}")
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Download the instructed model ([HuggingFaceTB/SmolLM2-1.7B-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct)) to be used by the Agent.
-# ------------------------------------------------------------
-
-model = TransformersModel("HuggingFaceTB/SmolLM2-1.7B-Instruct",
-                          device_map="auto",
-                          max_new_tokens=1000,
-                          torch_dtype=torch.float16)
-
-# ------------------------------------------------------------
-# Set up a CodeAgent, adding to its toolset the three custom tools for managing a flight search and booking and specifying the SLM to use.
-# ------------------------------------------------------------
-
-custom_tools = [search_for_flights, find_seat, book_flight_ticket]
-agent = CodeAgent(tools=custom_tools, model=model,
-                  verbosity_level=2, max_steps=3)
-
-# ------------------------------------------------------------
-# Run the agent on a user task and observe how it analyze it, splits it into steps, selects the tools, generates Python code and executes it.
-# ------------------------------------------------------------
-
-user_task = "Find a flight from Dublin to New York and then select a seat."
-agent.run(user_task)
+def build_model() -> TransformersModel:
+    """Download and configure the SmolLM2-1.7B-Instruct model."""
+    return TransformersModel(
+        MODEL_ID,
+        device_map="auto",
+        max_new_tokens=MAX_NEW_TOKENS,
+        torch_dtype=torch.float16,
+    )
 
 
+def build_agent(model: TransformersModel) -> CodeAgent:
+    """Set up a CodeAgent with the three custom flight tools."""
+    custom_tools = [search_for_flights, find_seat, book_flight_ticket]
+    return CodeAgent(tools=custom_tools, model=model,
+                     verbosity_level=2, max_steps=AGENT_MAX_STEPS)
+
+
+def main() -> None:
+    """Build the agent and run it on the user task."""
+    # Quick self-tests for the tools (optional — remove if not needed)
+    matching_flight = search_for_flights('DUB', 'JFK', '2023-03-15', MOCK_FLIGHTS_WEB_PAGE)
+    print(matching_flight)
+
+    selected_seat = find_seat('SFO-ANC123', 'Economy')
+    print(selected_seat)
+
+    booking = book_flight_ticket('DUB-JFK789', 'A1')
+    print(booking)
+
+    n = 10
+    print(f"The {n}-th Fibonacci number is: {fibonacci(n)}")
+
+    model = build_model()
+    agent = build_agent(model)
+    agent.run(USER_TASK)
+
+
+if __name__ == "__main__":
+    main()

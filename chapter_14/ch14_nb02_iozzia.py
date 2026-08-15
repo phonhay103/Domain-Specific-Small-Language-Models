@@ -1,95 +1,113 @@
-# ==========================================
-# Extracted from CH14_NB02_Iozzia.ipynb
-# ==========================================
+"""
+Implementing an Agentic RAG System with Open Source SLMs and SmolAgents.
 
-# ------------------------------------------------------------
-# # Implementing an Agentic RAG System with Open Source SLMs and SmolAgents
-# This notebook is a companion of chapter 14 of the "Domain-Specific Small Language Models" [book](https://www.manning.com/books/domain-specific-small-language-models), author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2025.  
-# The code in this notebook is an example implementation of an Agentic RAG (Retrieval Augmented Generation) system using only Small Language Models (SLMs), the HF's [SmolAgents](https://github.com/huggingface/smolagents) framework, [LangChain](https://github.com/langchain-ai/langchain) and [LanceDB](https://github.com/lancedb/lancedb). Hardware acceleration (GPU) is recommended.   
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+Companion script for chapter 14 of "Domain-Specific Small Language Models"
+by Guglielmo Iozzia, Manning Publications, 2025.
 
-# ------------------------------------------------------------
-# Install the missing requirements in the Colab VM.
-# ------------------------------------------------------------
+Demonstrates an Agentic RAG (Retrieval Augmented Generation) system using
+SmolAgents, LangChain, and LanceDB with Small Language Models. GPU recommended.
 
-# !pip install smolagents langchain lancedb langchain-community rank_bm25 pypdf langchain-huggingface ddgs
+# Install the missing requirements before running:
+# pip install smolagents langchain lancedb langchain-community rank_bm25 pypdf
+#             langchain-huggingface ddgs
 
-# ------------------------------------------------------------
-# Upload a PDF document.
-# ------------------------------------------------------------
+# Download the sample PDF:
+# curl https://arxiv.org/pdf/2502.12923 --output arxiv_250212923.pdf
+"""
 
-# !curl https://arxiv.org/pdf/2502.12923 --output arxiv_250212923.pdf
-
-# ------------------------------------------------------------
-# Extract the text from the uploaded document and chunk it.
-# ------------------------------------------------------------
-
-from langchain.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-loader = PyPDFLoader("/content/arxiv_250212923.pdf")
-documents = loader.load()
-
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-docs = text_splitter.split_documents(documents)
-
-print(len(docs))
-
-# ------------------------------------------------------------
-# Download the embedding model, [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2).
-# ------------------------------------------------------------
-
-from langchain_huggingface import HuggingFaceEmbeddings
-
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-# ------------------------------------------------------------
-# Create a local LanceDB database and the table where to store the embeddings. Then use the embedding model to transform the text chunks into embeddings and store them into the `document_embeddings` table.
-# ------------------------------------------------------------
+import os
+from typing import List
 
 import lancedb
 import numpy as np
 import pyarrow as pa
-
-db = lancedb.connect("./lancedb")
-
-# Define the schema for the table
-schema = pa.schema([
-    pa.field("embedding", pa.list_(pa.float32(), list_size=384)), # Specify FixedSizeList for embedding
-    pa.field("text", pa.string()),
-])
-
-table = db.create_table(
-    "document_embeddings",
-    schema=schema, # Pass the schema to create_table
-    data=[
-        {
-            "embedding": np.array(embeddings.embed_query(doc.page_content), dtype=np.float32).flatten().tolist(),
-            "text": doc.page_content,
-        }
-        for doc in docs
-    ],
-)
-
-# ------------------------------------------------------------
-# Define a custom SmolAgents tool to perform BM25 search on the knowledge base. BM25, or Best Matching 25, is a scoring algorithm used by search engines to evaluate how well a document matches a specific search query. It ranks documents based on factors like term frequency, document length, and the rarity of terms, making it effective for information retrieval tasks.
-# ------------------------------------------------------------
-
-from typing import List
+import torch
+from langchain.document_loaders import PyPDFLoader
 from langchain.docstore.document import Document
-from smolagents import Tool
+from langchain.retrievers import EnsembleRetriever
+from langchain.schema import BaseRetriever
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.retrievers import BM25Retriever
+from langchain_huggingface import HuggingFaceEmbeddings
+from pydantic import Field
+from smolagents import CodeAgent, DuckDuckGoSearchTool, Tool, TransformersModel
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+PDF_PATH = "/content/arxiv_250212923.pdf"
+LANCEDB_PATH = "./lancedb"
+TABLE_NAME = "document_embeddings"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_DIM = 384
+
+MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+MAX_NEW_TOKENS = 700
+AGENT_MAX_STEPS = 3
+
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 100
+BM25_K = 3
+HYBRID_WEIGHTS = [0.4, 0.6]  # [BM25 weight, semantic weight]
+
+AGENT_QUERY = "Do an hybrid search about Smart Home technologies and then search the web about the same"
+
+# ---------------------------------------------------------------------------
+# Document loading & embedding
+# ---------------------------------------------------------------------------
+
+def load_and_chunk_pdf(pdf_path: str, chunk_size: int, chunk_overlap: int) -> List[Document]:
+    """Load a PDF and split it into overlapping text chunks."""
+    loader = PyPDFLoader(pdf_path)
+    documents = loader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    return splitter.split_documents(documents)
+
+
+def create_lancedb_table(
+    db_path: str, table_name: str, docs: List[Document], embeddings: HuggingFaceEmbeddings
+) -> lancedb.table.LanceTable:
+    """Create a LanceDB table and populate it with document embeddings."""
+    db = lancedb.connect(db_path)
+
+    schema = pa.schema([
+        pa.field("embedding", pa.list_(pa.float32(), list_size=EMBEDDING_DIM)),
+        pa.field("text", pa.string()),
+    ])
+
+    table = db.create_table(
+        table_name,
+        schema=schema,
+        data=[
+            {
+                "embedding": np.array(
+                    embeddings.embed_query(doc.page_content), dtype=np.float32
+                ).flatten().tolist(),
+                "text": doc.page_content,
+            }
+            for doc in docs
+        ],
+    )
+    return table
+
+# ---------------------------------------------------------------------------
+# SmolAgents custom tools
+# ---------------------------------------------------------------------------
 
 class BM25SearchTool(Tool):
+    """SmolAgents tool that performs BM25 keyword search on local documents.
+
+    BM25 ranks documents based on term frequency, document length, and term
+    rarity — effective for keyword-based information retrieval.
+    """
+
     name = "do_bm25_search_on_local_documents"
-    description = "Uses text search to retrieve the parts of the documentation that could be most relevant to answer a query."
-    inputs = {
-        "query": {
-            "type": "string",
-            "description": "The search query string."
-        },
-    }
+    description = (
+        "Uses text search to retrieve the parts of the documentation "
+        "that could be most relevant to answer a query."
+    )
+    inputs = {"query": {"type": "string", "description": "The search query string."}}
     output_type = "string"
 
     def __init__(self, docs: List[Document], **kwargs):
@@ -97,27 +115,21 @@ class BM25SearchTool(Tool):
         self.docs = docs
 
     def forward(self, query: str) -> str:
-        retriever = BM25Retriever.from_documents(self.docs, k=3)
-        docs = retriever.invoke(query)
+        retriever = BM25Retriever.from_documents(self.docs, k=BM25_K)
+        results = retriever.invoke(query)
         return "\nRetrieved documents:\n" + "".join(
-            [f"\n\n===== Document {i} =====\n" + doc.page_content for i, doc in enumerate(docs)]
+            f"\n\n===== Document {i} =====\n" + doc.page_content
+            for i, doc in enumerate(results)
         )
 
-# ------------------------------------------------------------
-# Define a custom SmolAgents tool that performs semantic search on the `document_embeddings` table.
-# ------------------------------------------------------------
-
-from smolagents import Tool
-import numpy as np
 
 class SemanticSearchTool(Tool):
+    """SmolAgents tool that performs vector (semantic) search on a LanceDB table."""
+
     name = "semantic_search"
     description = "Performs semantic search on a database of document embeddings."
     inputs = {
-        "query": {
-            "type": "string",
-            "description": "The search query string.",
-        },
+        "query": {"type": "string", "description": "The search query string."},
         "top_k": {
             "type": "integer",
             "description": "The number of top results to return.",
@@ -133,28 +145,53 @@ class SemanticSearchTool(Tool):
         self.embeddings = embeddings
 
     def forward(self, query: str, top_k: int = 1) -> str:
-        """Performs semantic search on the document_embeddings table."""
-        query_embedding = self.embeddings.embed_query(query)
-        query_embedding = np.array(query_embedding)
-        results = self.table.search(query_embedding, vector_column_name="embedding").limit(top_k).to_df()
+        """Perform semantic search on the document_embeddings table."""
+        query_embedding = np.array(self.embeddings.embed_query(query))
+        results = (
+            self.table.search(query_embedding, vector_column_name="embedding")
+            .limit(top_k)
+            .to_df()
+        )
         return results.to_string()
 
-# ------------------------------------------------------------
-# Implement a custom SmolAgents Tool that does hybrid search (BM25 keyword search + vector search) on a LanceDB table. It uses LangChain's `EnsableRetriever` to combine the search results.
-# ------------------------------------------------------------
 
-from langchain.retrievers import EnsembleRetriever
-from langchain_community.retrievers import BM25Retriever
-from smolagents import Tool
+class LanceDBVectorSearch(BaseRetriever):
+    """LangChain-compatible vector search retriever backed by LanceDB.
+
+    Attributes:
+        table: The LanceDB table to search.
+        embeddings: The embeddings model to use.
+    """
+
+    table: lancedb.table.LanceTable = Field(...)
+    embeddings: HuggingFaceEmbeddings = Field(...)
+
+    def __init__(self, table: lancedb.table.LanceTable, embeddings: HuggingFaceEmbeddings):
+        super().__init__(table=table, embeddings=embeddings)
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        """Retrieve documents relevant to the query via vector search."""
+        query_embedding = np.array(self.embeddings.embed_query(query))
+
+        results = (
+            self.table.search(query_embedding, vector_column_name="embedding")
+            .limit(2)
+            .to_pandas()
+        )
+
+        return [
+            Document(page_content=row["text"], metadata={})
+            for _, row in results.iterrows()
+        ]
+
 
 class HybridSearchTool(Tool):
+    """SmolAgents tool combining BM25 keyword search and vector search via LangChain EnsembleRetriever."""
+
     name = "hybrid_search"
     description = "Performs a hybrid search (BM25 keyword + vector search) on a LanceDB table."
     inputs = {
-        "query": {
-            "type": "string",
-            "description": "The search query string.",
-        },
+        "query": {"type": "string", "description": "The search query string."},
         "top_k": {
             "type": "integer",
             "description": "The number of top results to return.",
@@ -168,124 +205,67 @@ class HybridSearchTool(Tool):
         super().__init__(**kwargs)
         self.ensemble_retriever = EnsembleRetriever(
             retrievers=[bm25_retriever, semantic_retriever],
-            weights=[0.4, 0.6])
+            weights=HYBRID_WEIGHTS,
+        )
 
     def forward(self, query: str, top_k: int = 1) -> str:
         docs = self.ensemble_retriever.get_relevant_documents(query)
-        # Process the results as needed
         return "\nRetrieved documents:\n" + "".join(
-            [f"\n\n===== Document {i} =====\n" + doc.page_content for i, doc in enumerate(docs)]
+            f"\n\n===== Document {i} =====\n" + doc.page_content
+            for i, doc in enumerate(docs)
         )
 
-# ------------------------------------------------------------
-# Implement a LanceDB custom retriever class.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
-from typing import List
-from langchain.schema import BaseRetriever, Document
-from pydantic import Field
+def build_agent(
+    hybrid_search_tool: HybridSearchTool,
+    model_id: str,
+) -> CodeAgent:
+    """Instantiate the SmolLM2 model and configure the CodeAgent."""
+    model = TransformersModel(
+        model_id,
+        device_map="auto",
+        max_new_tokens=MAX_NEW_TOKENS,
+        torch_dtype=torch.float16,
+    )
+    duckduckgo_search_tool = DuckDuckGoSearchTool()
+    custom_tools = [hybrid_search_tool, duckduckgo_search_tool]
+    return CodeAgent(
+        tools=custom_tools,
+        model=model,
+        max_steps=AGENT_MAX_STEPS,
+        verbosity_level=2,
+        add_base_tools=False,
+    )
 
-class LanceDBVectorSearch(BaseRetriever):
-    """
-    A vector search retriever that uses LanceDB for storage and retrieval.
 
-    Attributes:
-        table (lancedb.LanceTable): The LanceDB table to search.
-        embeddings (HuggingFaceEmbeddings): The embeddings model to use.
-    """
+def main() -> None:
+    """Load documents, build retrieval tools, create agent, and run a query."""
+    # Load and chunk the PDF
+    docs = load_and_chunk_pdf(PDF_PATH, CHUNK_SIZE, CHUNK_OVERLAP)
+    print(len(docs))
 
-    table: lancedb.table.LanceTable = Field(...) # Add Field for table
-    embeddings: HuggingFaceEmbeddings = Field(...)
+    # Build the embedding model and populate LanceDB
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    table = create_lancedb_table(LANCEDB_PATH, TABLE_NAME, docs, embeddings)
 
-    def __init__(self, table: lancedb.table.LanceTable, embeddings: HuggingFaceEmbeddings):
-        """
-        Initializes the LanceDBVectorSearch retriever.
+    # Build retrieval tools
+    bm25_retriever = BM25Retriever.from_documents(docs, k=BM25_K)
+    semantic_retriever = LanceDBVectorSearch(table=table, embeddings=embeddings)
+    hybrid_search_tool = HybridSearchTool(bm25_retriever, semantic_retriever)
 
-        Args:
-            table (lancedb.LanceTable): The LanceDB table to search.
-            embeddings (HuggingFaceEmbeddings): The embeddings model to use.
-        """
-        super().__init__(table=table, embeddings=embeddings) # Pass table and embeddings to super().__init__
+    # Quick smoke-test of hybrid search
+    results = hybrid_search_tool.forward("Smart Home technologies", top_k=2)
+    print(results)
 
-    def _get_relevant_documents(self, query: str) -> List[Document]:
-        """
-        Retrieves relevant documents based on the given query.
+    # Build and run the agent
+    agent = build_agent(hybrid_search_tool, MODEL_ID)
+    agent_output = agent.run(AGENT_QUERY)
+    print("Final output:")
+    print(agent_output)
 
-        Args:
-            query (str): The search query.
 
-        Returns:
-            List[Document]: A list of relevant documents.
-        """
-        query_embedding = self.embeddings.embed_query(query)
-        query_embedding = np.array(query_embedding)
-
-        # Perform the search in LanceDB
-        results = self.table.search(query_embedding, vector_column_name="embedding").limit(2).to_pandas()  # Limit to top 10 results
-
-        # Convert the results to Document objects
-        documents = [
-            Document(page_content=row["text"], metadata={})
-            for _, row in results.iterrows()
-        ]
-
-        return documents
-
-# ------------------------------------------------------------
-# Test the hybrid search.
-# ------------------------------------------------------------
-
-bm25_retriever = BM25Retriever.from_documents(docs, k=3)
-semantic_retriever = LanceDBVectorSearch(table=table, embeddings=embeddings)
-
-hybrid_search_tool = HybridSearchTool(bm25_retriever, semantic_retriever)
-results = hybrid_search_tool.forward("Smart Home technologies", top_k=2)
-print(results)
-
-# ------------------------------------------------------------
-# Download the instructed SLM ([SmolLM2-1.7B-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct)) for the agent.
-# ------------------------------------------------------------
-
-import os
-import torch
-from smolagents import TransformersModel, CodeAgent, DuckDuckGoSearchTool
-
-model_id = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-model = TransformersModel(model_id,
-                          device_map="auto",
-                          max_new_tokens=700,
-                          torch_dtype=torch.float16)
-
-# ------------------------------------------------------------
-# Create an instance of the SmolAgents' built-in `DuckDuckGoSearchTool`.
-# ------------------------------------------------------------
-
-from smolagents import DuckDuckGoSearchTool
-
-duckduckgo_search_tool = DuckDuckGoSearchTool()
-
-# ------------------------------------------------------------
-# Create and setup the code agent, specifying the SLM to use and the list of allowed custom tools.
-# ------------------------------------------------------------
-
-custom_tools = [hybrid_search_tool, duckduckgo_search_tool]
-agent = CodeAgent(
-    tools=custom_tools,
-    model=model,
-    max_steps=3,
-    verbosity_level=2,
-    add_base_tools=False
-)
-
-# ------------------------------------------------------------
-# Perform a query with the agent.
-# ------------------------------------------------------------
-
-#query = "Search the web for MSD Ireland"
-#query = "Do an hybrid search about Smart Home technologies"
-query = "Do an hybrid search about Smart Home technologies and then search the web about the same"
-#query = "Do a semantic search for MSD"
-agent_output = agent.run(query)
-print("Final output:")
-agent_output
-
+if __name__ == "__main__":
+    main()

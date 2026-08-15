@@ -1,137 +1,114 @@
-# ==========================================
-# Extracted from CH06_NB01_Iozzia.ipynb
-# ==========================================
+"""Quantization of the GPT-2 Small Model (absmax).
 
-# ------------------------------------------------------------
-# # Quantization of the GPT-2 Small Model
-# This notebook is a companion of chapter 6 of the "Domain Specific LLMs in Action" book, author Guglielmo Iozzia, [Manning Publications](https://www.manning.com/), 2024.  
-# The code in this notebook is to introduce readers to the quantization of a decoder-only language model, [GPT-2 Small](https://huggingface.co/openai-community/gpt2). It doesn't require hardware acceleration.  
-# More details about the code can be found in the related book's chapter.
-# ------------------------------------------------------------
+Companion script for Chapter 6 of "Domain Specific LLMs in Action"
+(Guglielmo Iozzia, Manning Publications, 2024).
 
-# ------------------------------------------------------------
-# Import the required packages and classes.
-# ------------------------------------------------------------
+Introduces absmax quantization of a decoder-only language model (GPT-2 Small).
+Does not require hardware acceleration.
+"""
 
+# Standard library
+from copy import deepcopy
+
+# Third-party
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# ------------------------------------------------------------
-# Download the GPT-2 Small model and associated tokenizer from the HF's Hub and load it to CPU. Finally print the size (in bytes) of the model in memory.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MODEL_ID = "openai-community/gpt2"
+DEVICE = "cpu"
+GENERATION_PROMPT = "My favourite school subject is"
+MAX_GEN_LENGTH = 100
+TOP_K = 30
+HIST_BINS = 150
+HIST_RANGE = (-2, 2)
+PLOT_DPI = 300
 
-device = 'cpu'
 
-model_id = 'openai-community/gpt2'
-model = AutoModelForCausalLM.from_pretrained(model_id).to(device)
-tokenizer = AutoTokenizer.from_pretrained(model_id)
+# ---------------------------------------------------------------------------
+# Quantization helpers
+# ---------------------------------------------------------------------------
+def absmax_quantize(X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply absmax quantization/dequantization to tensor *X*.
 
-print(f"Model size: {model.get_memory_footprint():,} bytes")
-
-# ------------------------------------------------------------
-# Define a custom function to perform *absmax* quantization and dequantization.
-# ------------------------------------------------------------
-
-def absmax_quantize(X):
-    # Calculate scale
+    Returns:
+        (X_quant, X_dequant): int8 quantized tensor and float dequantized tensor.
+    """
+    # Scale so that the maximum absolute value maps to 127
     scale = 127 / torch.max(torch.abs(X))
-
-    # Quantize
     X_quant = (scale * X).round()
-
-    # Dequantize
     X_dequant = X_quant / scale
-
     return X_quant.to(torch.int8), X_dequant
 
-# ------------------------------------------------------------
-# Clone the source model and apply the previously defined quantization function to all the weights of the cloned copy.
-# ------------------------------------------------------------
 
-import numpy as np
-from copy import deepcopy
+def apply_absmax_to_model(model) -> tuple:
+    """Clone *model* and replace all weights with their absmax-dequantized versions.
 
-weights = [param.data.clone() for param in model.parameters()]
+    Returns:
+        (model_abs, weights_abs): cloned quantized model and list of dequantized weight tensors.
+    """
+    model_abs = deepcopy(model)
+    weights_abs = []
+    for param in model_abs.parameters():
+        _, dequantized = absmax_quantize(param.data)
+        param.data = dequantized
+        weights_abs.append(dequantized)
+    return model_abs, weights_abs
 
-model_abs = deepcopy(model)
 
-weights_abs = []
-for param in model_abs.parameters():
-    _, dequantized = absmax_quantize(param.data)
-    param.data = dequantized
-    weights_abs.append(dequantized)
+# ---------------------------------------------------------------------------
+# Visualisation
+# ---------------------------------------------------------------------------
+def plot_weight_distributions(
+    weights: np.ndarray,
+    weights_abs: np.ndarray,
+) -> None:
+    """Plot overlapping histograms comparing original and absmax-quantized weights."""
+    plt.style.use("ggplot")
+    fig, axs = plt.subplots(1, figsize=(10, 10), dpi=PLOT_DPI, sharex=True)
 
-# ------------------------------------------------------------
-# Using the matplotlib library, plot the distribution of the weights for the source model and the quantized version both on the same histogram chart.
-# ------------------------------------------------------------
+    axs.hist(weights, bins=HIST_BINS, alpha=0.5, label="Original weights",
+             color="blue", range=HIST_RANGE)
+    axs.hist(weights_abs, bins=HIST_BINS, alpha=0.5, label="Absmax weights",
+             color="yellow", range=HIST_RANGE)
 
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
+    axs.grid(True, linestyle="--", alpha=0.6)
+    axs.legend()
+    axs.set_title("Comparison of Original and Absmax Quantized Weights", fontsize=16)
+    axs.set_xlabel("Weights", fontsize=14)
+    axs.set_ylabel("Count", fontsize=14)
+    axs.yaxis.set_major_formatter(ticker.EngFormatter())  # Make y-ticks more human readable
 
-weights = np.concatenate([t.cpu().numpy().flatten() for t in weights])
-weights_abs = np.concatenate([t.cpu().numpy().flatten() for t in weights_abs])
+    plt.rc("font", size=12)
+    plt.tight_layout()
+    plt.show()
 
-# Set background style
-plt.style.use('ggplot')
 
-# Create figure and axes
-fig, axs = plt.subplots(1, figsize=(10,10), dpi=300, sharex=True)
-
-# Plot the histograms for original and zero-point weights
-axs.hist(weights, bins=150, alpha=0.5, label='Original weights', color='blue', range=(-2, 2))
-axs.hist(weights_abs, bins=150, alpha=0.5, label='Absmax weights', color='yellow', range=(-2, 2))
-
-# Add grid
-axs.grid(True, linestyle='--', alpha=0.6)
-
-# Add legend
-axs.legend()
-
-# Add title and labels
-axs.set_title('Comparison of Original and Absmax Quantized Weights', fontsize=16)
-
-axs.set_xlabel('Weights', fontsize=14)
-axs.set_ylabel('Count', fontsize=14)
-axs.yaxis.set_major_formatter(ticker.EngFormatter()) # Make y-ticks more human readable
-
-# Improve font
-plt.rc('font', size=12)
-
-plt.tight_layout()
-plt.show()
-
-# ------------------------------------------------------------
-# Define a function to generate text, whatever the model (original or quantized).
-# ------------------------------------------------------------
-
-def generate_text(model, input_text, max_length=100):
-    input_ids = tokenizer.encode(input_text, return_tensors='pt').to(device)
-    output = model.generate(inputs=input_ids,
-                            max_length=max_length,
-                            do_sample=True,
-                            top_k=30,
-                            pad_token_id=tokenizer.eos_token_id,
-                            attention_mask=input_ids.new_ones(input_ids.shape))
+# ---------------------------------------------------------------------------
+# Text generation & evaluation
+# ---------------------------------------------------------------------------
+def generate_text(model, tokenizer, input_text: str, max_length: int = MAX_GEN_LENGTH) -> str:
+    """Generate text from *model* given *input_text*."""
+    input_ids = tokenizer.encode(input_text, return_tensors="pt").to(DEVICE)
+    output = model.generate(
+        inputs=input_ids,
+        max_length=max_length,
+        do_sample=True,
+        top_k=TOP_K,
+        pad_token_id=tokenizer.eos_token_id,
+        attention_mask=input_ids.new_ones(input_ids.shape),
+    )
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
-# ------------------------------------------------------------
-# Use the text generation function defined in the previous code cell to generate text with both model versions (the original and the one after quantization).
-# ------------------------------------------------------------
 
-prompt = 'My favourite school subject is'
-original_text = generate_text(model, prompt)
-absmax_text   = generate_text(model_abs, prompt)
-
-print(f"Original model:\n{original_text}")
-print(f"Absmax model:\n{absmax_text}")
-
-# ------------------------------------------------------------
-# Define a function to calculate the perplexity score.
-# ------------------------------------------------------------
-
-def calculate_perplexity(model, text, device):
-    encodings = tokenizer(text, return_tensors='pt').to(device)
-
+def calculate_perplexity(model, tokenizer, text: str, device: str) -> torch.Tensor:
+    """Calculate perplexity of *model* on *text*."""
+    encodings = tokenizer(text, return_tensors="pt").to(device)
     input_ids = encodings.input_ids
     target_ids = input_ids.clone()
 
@@ -139,18 +116,44 @@ def calculate_perplexity(model, text, device):
         outputs = model(input_ids, labels=target_ids)
 
     neg_log_likelihood = outputs.loss
+    return torch.exp(neg_log_likelihood)
 
-    perplexity = torch.exp(neg_log_likelihood)
 
-    return perplexity
+# ---------------------------------------------------------------------------
+# Main orchestration
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Run absmax quantization demo: load, quantize, visualize, generate, evaluate."""
+    # Load model and tokenizer
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID).to(DEVICE)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    print(f"Model size: {model.get_memory_footprint():,} bytes")
 
-# ------------------------------------------------------------
-# Calculate the perplexity score for both versions of the model, using the text results previously generated by both.
-# ------------------------------------------------------------
+    # Capture original weights before quantization modifies the clone
+    original_weights = [param.data.clone() for param in model.parameters()]
 
-perplexity = calculate_perplexity(model, original_text, device)
-perplexity_absmax = calculate_perplexity(model_abs, absmax_text, device)
+    # Apply absmax quantization to a deep copy of the model
+    model_abs, weights_abs_list = apply_absmax_to_model(model)
 
-print(f"Original perplexity:  {perplexity.item():.2f}")
-print(f"Absmax perplexity:    {perplexity_absmax.item():.2f}")
+    # Flatten all weights for histogram comparison
+    weights_flat = np.concatenate([t.cpu().numpy().flatten() for t in original_weights])
+    weights_abs_flat = np.concatenate([t.cpu().numpy().flatten() for t in weights_abs_list])
 
+    # Visualise weight distributions
+    plot_weight_distributions(weights_flat, weights_abs_flat)
+
+    # Generate text with both model versions
+    original_text = generate_text(model, tokenizer, GENERATION_PROMPT)
+    absmax_text = generate_text(model_abs, tokenizer, GENERATION_PROMPT)
+    print(f"Original model:\n{original_text}")
+    print(f"Absmax model:\n{absmax_text}")
+
+    # Evaluate perplexity
+    perplexity = calculate_perplexity(model, tokenizer, original_text, DEVICE)
+    perplexity_absmax = calculate_perplexity(model_abs, tokenizer, absmax_text, DEVICE)
+    print(f"Original perplexity:  {perplexity.item():.2f}")
+    print(f"Absmax perplexity:    {perplexity_absmax.item():.2f}")
+
+
+if __name__ == "__main__":
+    main()

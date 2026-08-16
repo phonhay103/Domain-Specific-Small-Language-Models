@@ -71,7 +71,7 @@ class LatencyBenchmarkSummary:
 
 
 MODEL_ID = "optimum/distilbert-base-uncased-finetuned-banking77"
-DATASET_ID = "PolyAI/banking77"
+DATASET_ID = "mteb/banking77"
 ONNX_PATH = Path("onnx")
 ORIGINAL_MODEL_NAME = "model.onnx"
 QUANTIZED_MODEL_NAME = "model_quantized.onnx"

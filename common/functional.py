@@ -61,6 +61,11 @@ def format_percentage(numerator: float, denominator: float) -> float:
     return (numerator / denominator * 100.0) if denominator != 0.0 else 0.0
 
 
+def get_model_memory_bytes(model: Any) -> int:
+    """Pure calculation of total model memory usage in bytes across all parameters."""
+    return sum(param.numel() * param.element_size() for param in model.parameters())
+
+
 def calculate_speedup(baseline_latency: float, target_latency: float) -> float:
     """Calculate speedup ratio between baseline and optimized target."""
     return (baseline_latency / target_latency) if target_latency > 0.0 else 1.0

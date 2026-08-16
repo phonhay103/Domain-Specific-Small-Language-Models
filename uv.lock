@@ -555,6 +555,16 @@ wheels = [
 ]
 
 [[package]]
+name = "defuser"
+version = "0.0.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pypcre" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d3/be/8e44425db207728d173ce2c64c632290c00e5f3da7e2733edd7fed5eb039/defuser-0.0.25.tar.gz", hash = "sha256:d490f701d6ff3dac65c08288c670fe9bb939f37e1db19af49a38f9085140c301", size = 63973, upload-time = "2026-08-04T17:27:12.988Z" }
+
+[[package]]
 name = "deprecation"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -565,6 +575,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/5a/d3/8ae2869247df154b6
 wheels = [
     { url = "https://files.pythonhosted.org/packages/02/c3/253a89ee03fc9b9682f1541728eb66db7db22148cd94f89ab22528cd1e1b/deprecation-2.1.0-py2.py3-none-any.whl", hash = "sha256:a10811591210e1fb0e768a8c25517cabeabcba6f0bf96564f8ff45189f90b14a", size = 11178, upload-time = "2020-04-20T14:23:36.581Z" },
 ]
+
+[[package]]
+name = "device-smi"
+version = "0.5.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/f3/2bdbcbf01fc58f5c9e7b9ddf3a4677912a3e9cbad051fcfa559f2ff1ab8f/device_smi-0.5.6.tar.gz", hash = "sha256:1481d2cccc7405c3f255eb0a91a44e90ae1e6c4d1470d010b94fb8e2b291b057", size = 18888, upload-time = "2026-04-23T04:14:55.121Z" }
 
 [[package]]
 name = "dill"
@@ -597,6 +613,7 @@ dependencies = [
     { name = "evaluate" },
     { name = "faiss-cpu" },
     { name = "fire" },
+    { name = "gptqmodel" },
     { name = "huggingface-hub" },
     { name = "lancedb" },
     { name = "langchain" },
@@ -653,6 +670,7 @@ requires-dist = [
     { name = "evaluate", specifier = ">=0.4.6" },
     { name = "faiss-cpu", specifier = ">=1.15.0" },
     { name = "fire", specifier = ">=0.7.1" },
+    { name = "gptqmodel", specifier = "==7.3.2" },
     { name = "huggingface-hub", specifier = ">=1.27.0" },
     { name = "lancedb", specifier = ">=0.37.1" },
     { name = "langchain", specifier = ">=1.3.15" },
@@ -870,6 +888,35 @@ wheels = [
 http = [
     { name = "aiohttp" },
 ]
+
+[[package]]
+name = "gptqmodel"
+version = "7.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "datasets" },
+    { name = "defuser" },
+    { name = "device-smi" },
+    { name = "dill" },
+    { name = "jinja2" },
+    { name = "logbar" },
+    { name = "maturin" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pillow" },
+    { name = "protobuf" },
+    { name = "pyarrow" },
+    { name = "pypcre" },
+    { name = "safetensors" },
+    { name = "threadpoolctl" },
+    { name = "tokenicer" },
+    { name = "torch" },
+    { name = "torchao" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/52/e4/9bf60ee6de4335b588e3b99fb22ebbc4fe31c76d52f8069cdbe34240c87d/gptqmodel-7.3.2.tar.gz", hash = "sha256:767261b4e055fcfff15ae6553062422c39ac72137a0da543d245092c8aa3896e", size = 1048012, upload-time = "2026-07-25T04:21:02.112Z" }
 
 [[package]]
 name = "greenlet"
@@ -1352,6 +1399,12 @@ wheels = [
 ]
 
 [[package]]
+name = "logbar"
+version = "0.4.12"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/4b/4d73f01edc33c76af393d4e47d822b254f32052097908d2c922b4910bfb0/logbar-0.4.12.tar.gz", hash = "sha256:cd97ca8ec9d2a9323f82d75500f2fd15d120d0d3cf9fec2b72a1ad671378958c", size = 109619, upload-time = "2026-08-05T03:52:27.42Z" }
+
+[[package]]
 name = "lxml"
 version = "6.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1480,6 +1533,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0f/68/3c22e9320bdce2c4d2f1320643ef706db7a24cb7420eea28b97a2d67f5a8/matplotlib-3.11.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:b937b9dba5f5f6c1e31c47abe2186c865c0914fd18f2ce0dfc39c9adcef5951d", size = 10943061, upload-time = "2026-07-18T03:39:32.356Z" },
     { url = "https://files.pythonhosted.org/packages/f6/4a/907ed190ee81a9df581e0ed5456134fc0f7cb55ffcfda2f9e54ca900761c/matplotlib-3.11.1-cp314-cp314t-win_amd64.whl", hash = "sha256:f2912f647f3fbe1ccf085f91e213936f9101bead81a5e670565b1f1b3712f4fb", size = 9540074, upload-time = "2026-07-18T03:39:34.789Z" },
     { url = "https://files.pythonhosted.org/packages/23/d4/97c19b77e0a6e3b48581185bb65088f431cd20186076cc0f650a1757ea46/matplotlib-3.11.1-cp314-cp314t-win_arm64.whl", hash = "sha256:54d47b8ae8b579633a3902ca5b4ad6c1e132a5626d64447b2e22a66394e79987", size = 9213472, upload-time = "2026-07-18T03:39:37.141Z" },
+]
+
+[[package]]
+name = "maturin"
+version = "1.14.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e7/b3/addd877f871fb1860d46d3a4f206ecb10b946c85846805e6367631926fd3/maturin-1.14.1.tar.gz", hash = "sha256:9d6577a62cd08e0ceba7a0db06fb098e0c9b1b3429bad747a4f3a18215a1b3df", size = 369637, upload-time = "2026-06-19T05:19:49.774Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/f0/97c5a5bd9c71653a066c0976a484eaaae50b9369557838a4176b7b0bdaa5/maturin-1.14.1-py3-none-linux_armv6l.whl", hash = "sha256:522292398945442cdafa9daeb2271b2340fbde57027b818f923f88eab04174f8", size = 10207496, upload-time = "2026-06-19T05:19:09.321Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/83/294bca639b0e052f1e2f65199b3db258780c7d4e31408b934c9c974a1379/maturin-1.14.1-py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:ffe5ad71f21d1e6603c4dd75f7fee34adf5ed5ebcebb692886549888ebb329ed", size = 19680113, upload-time = "2026-06-19T05:19:13.43Z" },
+    { url = "https://files.pythonhosted.org/packages/43/b6/79c881410a3b1c187f7eb3d407aecae646c6a4433d630d72200359015e83/maturin-1.14.1-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:f3306078070c1508fd715b9116070cbcaff5959024272a9f1e6f5cb29768b86c", size = 10169205, upload-time = "2026-06-19T05:19:16.615Z" },
+    { url = "https://files.pythonhosted.org/packages/93/9d/44b6f26dcb7f7a04c5501ac2dbb6ca1490150682baa525ca5860504f9eab/maturin-1.14.1-py3-none-manylinux_2_12_i686.manylinux2010_i686.musllinux_1_1_i686.whl", hash = "sha256:cd457cd88961156e26379e1155bd287cc0ec1c8b2f1582b0660fb31b87c8842d", size = 10188098, upload-time = "2026-06-19T05:19:19.736Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/bd/9c0d5d6983905ce2c9edaa073a7e89355a9cf7f396988e05d32f1c37785d/maturin-1.14.1-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl", hash = "sha256:dfc54ae32e6fcb18302193ab9a30b0b25eefffba994ae13238974805533ef75e", size = 10627576, upload-time = "2026-06-19T05:19:22.713Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/33/b096412bd6a7cb399652b260666f901adf88a687181a6dbd6a3f89f0a94e/maturin-1.14.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:a131d912b5267e640bc96d70f4914e10590aed64082ec9abacba7cea52004224", size = 10085181, upload-time = "2026-06-19T05:19:25.69Z" },
+    { url = "https://files.pythonhosted.org/packages/56/8d/08c3bf469c38a23c9e6c877e338193001eb604d010fedc08341974e38528/maturin-1.14.1-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l.whl", hash = "sha256:be18fc568fb76884c0205456336892a75105ec398e6b667cd777c6268bd06d69", size = 10026363, upload-time = "2026-06-19T05:19:28.904Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/a4/c4d1a92839f8745ab4aab988a7db884a79d6d710bd3b286fcf9316dece1a/maturin-1.14.1-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.musllinux_1_1_ppc64le.whl", hash = "sha256:994a0c8ba3ad8a92b3a9ee1b02645d200d610216b15cff5102b0fe65e8e08666", size = 13321347, upload-time = "2026-06-19T05:19:32.411Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/fa/170f04624d03fd07d2a8b1b67de83a127af93aef9eaa425839553347297b/maturin-1.14.1-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:be80866363e605d137991b491a741a84cde9ae350183c4c85f49690ca9aaaa65", size = 10877609, upload-time = "2026-06-19T05:19:35.448Z" },
+    { url = "https://files.pythonhosted.org/packages/61/ad/1ae2e1d0ded282bf2c55ac13f0811d87deb425e200ae64a15785675dede9/maturin-1.14.1-py3-none-manylinux_2_31_riscv64.musllinux_1_1_riscv64.whl", hash = "sha256:5282dffd4b539d2be245f4e5b1a5ab6bc1033b58f4a4872f5833f9d43c954aa4", size = 10417316, upload-time = "2026-06-19T05:19:38.28Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/27/bf677183920718da49cd7982d6a3ffc440aad8919329f571d189f81b7bdf/maturin-1.14.1-py3-none-win32.whl", hash = "sha256:1a04de0a20188f95c721b5702eed18140bdcccb28c386797093eca3f62f4d4e0", size = 8931293, upload-time = "2026-06-19T05:19:41.183Z" },
+    { url = "https://files.pythonhosted.org/packages/63/4b/585adeb9167b08d3cdff0032a938b0e72655c92003df4f52c3f696a1bcc2/maturin-1.14.1-py3-none-win_amd64.whl", hash = "sha256:3c9f94640ecc4895e94abaf834a0684430032c865b2748a36c12461fd9252fdd", size = 10314067, upload-time = "2026-06-19T05:19:44.389Z" },
+    { url = "https://files.pythonhosted.org/packages/51/d4/dac8c0720ae246be1700afb6fbdbbea20fe35b13f6570b2f70faa005df77/maturin-1.14.1-py3-none-win_arm64.whl", hash = "sha256:15cea8fcb3ba47dd636f50092bb34baea8b04ac777392f23e6bf8a9a61efb894", size = 9718943, upload-time = "2026-06-19T05:19:47.49Z" },
 ]
 
 [[package]]
@@ -2518,6 +2592,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pypcre"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/0d/77a616ce89f12ce4fbd747b905747e5ede37821a8470010cbdcf6ce211ee/pypcre-0.6.0.tar.gz", hash = "sha256:6df9f523b0c70114883e95a72e10b68ac7f13267660de51aa5e049e1a46eb35f", size = 154603, upload-time = "2026-08-09T05:46:14.3Z" }
+
+[[package]]
 name = "pypdf2"
 version = "3.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3080,6 +3160,12 @@ wheels = [
 ]
 
 [[package]]
+name = "tokenicer"
+version = "0.0.14"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d5/71/afb973aca6ca27412a6a20775075e086ca022d9da7034d081051f20bc186/tokenicer-0.0.14.tar.gz", hash = "sha256:ef4d8346e1cc747f2c7854eb6510b6fe95d09941ed33b4a89ea1f1bbb7b849d0", size = 14281, upload-time = "2026-07-22T05:10:52.766Z" }
+
+[[package]]
 name = "tokenizers"
 version = "0.22.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3134,6 +3220,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/69/d1/491e3a0389430946145888b0203f2b6a759ce2a61481b96a85c2da4f2ced/torch-2.13.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:31061ff56ed8fbf26c749806905aeb749ebeb819810fd5d52508aa5afd90dddc", size = 427219769, upload-time = "2026-07-08T16:02:31.18Z" },
     { url = "https://files.pythonhosted.org/packages/9a/1d/38006e045bf0a1fc28ef01e757c554e59e59a8770c284bc4f47b14e60441/torch-2.13.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:cc26eead4cf51d0b544e31e364dcf000846549c273bd148936fe9d24d29acb92", size = 526571320, upload-time = "2026-07-08T16:01:59.348Z" },
     { url = "https://files.pythonhosted.org/packages/56/94/655c91992a882bd5071aa0b5d22a07dbb130d801e872be97c0b627a7c693/torch-2.13.0-cp314-cp314t-win_amd64.whl", hash = "sha256:a7de8a313090dc5c7d7ba4bfe5c3be222528f9a4dba1acc83bddb1157360c4b8", size = 122306773, upload-time = "2026-07-08T16:02:39.832Z" },
+]
+
+[[package]]
+name = "torchao"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/55/ed9ad98f0f09d5a1124d09830043d13a39e63539f9590d2bdb6d71cbc4a4/torchao-0.18.0-cp310-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6540b148e40ba81cbd4de86392225a076a1591146e9cebb099b3b234ba9feebe", size = 3372585, upload-time = "2026-08-03T19:43:10.993Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/4d/485477bb8f05bd501016059c6d8abd742f830cb1b24ab7704e086c7cc35a/torchao-0.18.0-py3-none-any.whl", hash = "sha256:5c2b4485341bf28b7fed2c4fc95b9f298e209f41685350f067de85527a05585e", size = 1369798, upload-time = "2026-08-03T19:43:12.649Z" },
 ]
 
 [[package]]

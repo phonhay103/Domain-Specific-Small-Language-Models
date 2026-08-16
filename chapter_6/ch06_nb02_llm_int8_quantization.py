@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 # Common functional & UI utilities
 from common.functional import format_percentage, get_model_memory_bytes
@@ -79,7 +79,9 @@ PLOT_DPI = 300
 # ---------------------------------------------------------------------------
 def extract_model_weight_array(model: Any) -> np.ndarray:
     """Pure array extraction: flatten all parameters into a 1-D numpy array."""
-    return np.concatenate([param.data.clone().cpu().numpy().flatten() for param in model.parameters()])
+    return np.concatenate(
+        [param.data.clone().to(torch.float32).cpu().numpy().flatten() for param in model.parameters()]
+    )
 
 
 def compute_memory_reduction(fp32_bytes: int, int8_bytes: int) -> MemoryComparison:
@@ -162,12 +164,14 @@ def main() -> None:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        model_fp32 = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.float32).to(device)
+        model_fp32 = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.float32).to(device)
         model_fp32.eval()
 
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
         model_int8 = AutoModelForCausalLM.from_pretrained(
             MODEL_ID,
-            load_in_8bit=True,
+            quantization_config=quantization_config,
+            dtype=torch.float16,
             device_map="auto",
         )
         model_int8.eval()

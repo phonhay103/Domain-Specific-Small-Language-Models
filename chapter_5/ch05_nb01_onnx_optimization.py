@@ -252,7 +252,6 @@ def main() -> None:
         )
     render_card("ONNX Export", f"Model exported to:\n[text.highlight]{BASE_ONNX_PATH}[/text.highlight]", icon="💾")
 
-
     # Step 4: Applying Graph-Level Optimizations
     render_step(4, "Applying Graph-Level Operator Fusion", icon="⚡")
     with status_spinner("Fusing MultiHeadAttention and LayerNorm kernels..."):
@@ -309,7 +308,6 @@ def main() -> None:
 
     summary = LatencyBenchmarkSummary(pt_ms=pt_lat, base_onnx_ms=base_lat, opt_onnx_ms=opt_lat)
     render_latency_summary_table(summary)
-
 
     # Educational Takeaways
     render_takeaways(

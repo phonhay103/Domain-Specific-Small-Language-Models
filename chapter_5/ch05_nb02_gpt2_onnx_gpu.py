@@ -63,7 +63,7 @@ class GPULatencyMeasurement:
 
 
 MODEL_ID = "openai-community/gpt2"
-OUTPUT_DIR = "./output_dir"
+OUTPUT_DIR = "experiments"
 ONNX_DIR = f"{OUTPUT_DIR}/onnx_gpt2"
 BASE_ONNX_PATH = f"{ONNX_DIR}/gpt2.onnx"
 OPT_ONNX_PATH = f"{ONNX_DIR}/gpt2_opt_gpu.onnx"

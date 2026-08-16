@@ -73,7 +73,7 @@ MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 OPTILLM_DATASET = "codelion/optillmbench"
 DATASET_CATEGORY = "gsm8k"
 MAX_SAMPLES = 28
-OUTPUT_DIR = "results"
+OUTPUT_DIR = "experiments"
 
 DECODE_PARAMS = {"do_sample": True, "temperature": 0.1, "max_new_tokens": 1024}
 

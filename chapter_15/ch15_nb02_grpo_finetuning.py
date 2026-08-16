@@ -73,7 +73,7 @@ DATASET_SLICE = "train[0:100]"  # 100 samples — 90 train / 10 test
 DATASET_SEED = 42
 TEST_SIZE = 0.1
 
-OUTPUT_DIR = "outputs"
+OUTPUT_DIR = "experiments"
 LORA_SAVE_DIR = "grpo_saved_lora"
 MERGED_SAVE_DIR = "model"
 TRAINING_LOG_FILE = "training_output.txt"

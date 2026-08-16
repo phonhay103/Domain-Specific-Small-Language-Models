@@ -13,7 +13,7 @@ Setup instructions (run once before executing this script):
     git clone https://github.com/openai/human-eval && cd human-eval && pip install . && cd ..
     mkdir -p datasets/nominal/
     wget -P datasets/nominal/ https://raw.githubusercontent.com/amazon-science/recode/refs/heads/main/datasets/nominal/HumanEval.jsonl
-    mkdir -p output_dir/output
+    mkdir -p experiments/output
 """
 
 import ast
@@ -66,11 +66,11 @@ from common.ui import (
 # Model and file path constants
 MODEL_ID = "Salesforce/codegen-350M-mono"
 PROBLEMS_FILE_PATH = "datasets/nominal/HumanEval.jsonl"
-OUTPUT_DIR = "output_dir"
+OUTPUT_DIR = "experiments"
 FPATH_FORMAT = os.path.join(OUTPUT_DIR, "output", "taskid-{task_idx}-gen{completion_idx}.json")
-DEFAULT_SAMPLE_DIR = "/content/output_dir/output/"
+DEFAULT_SAMPLE_DIR = "/content/experiments/output/"
 DEFAULT_PROBLEM_FILE = "/content/datasets/nominal/HumanEval.jsonl"
-TEMP_SAMPLES_FILE = "/content/output_dir/temp_samples.jsonl"
+TEMP_SAMPLES_FILE = "/content/experiments/temp_samples.jsonl"
 
 # Generation hyperparameters
 PAD_TOKEN_ID = 50256

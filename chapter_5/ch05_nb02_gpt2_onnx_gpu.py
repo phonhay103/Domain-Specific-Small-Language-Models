@@ -50,6 +50,26 @@ from common.ui import (
 
 
 # ---------------------------------------------------------------------------
+# ONNX Export Shim
+# ---------------------------------------------------------------------------
+class _LogitsOnlyWrapper(torch.nn.Module):
+    """Thin wrapper that exposes only the logits tensor for ONNX tracing.
+
+    The new dynamo-based torch.onnx.export requires all model outputs to be
+    registered pytree types.  GPT-2 returns a ``DynamicCache`` alongside the
+    logits, which is not a known pytree type and causes export to fail.
+    This shim strips that output so the exporter only ever sees a plain tensor.
+    """
+
+    def __init__(self, model: torch.nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        return self.model(input_ids).logits  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
 # Immutable Domain Records & Constants
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -161,8 +181,9 @@ def main() -> None:
         dummy_inputs = {k: v.to("cuda") for k, v in dummy_inputs.items()}
 
     with status_spinner("Exporting dynamic ONNX computational graph..."):
+        export_model = _LogitsOnlyWrapper(model)
         torch.onnx.export(
-            model,
+            export_model,
             (dummy_inputs["input_ids"],),
             BASE_ONNX_PATH,
             input_names=["input_ids"],

@@ -10,3 +10,5 @@ results/
 runs/
 experiments/
 checkpoint-*/
+onnx/
+*.onnx

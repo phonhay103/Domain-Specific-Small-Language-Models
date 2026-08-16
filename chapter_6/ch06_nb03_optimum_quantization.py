@@ -1,16 +1,16 @@
-"""Quantization of a Finetuned BERT Model with HF's Optimum.
+"""Quantization of a Finetuned BERT Model with ONNX Runtime & Optimum.
 
 Companion script for Chapter 6 of "Domain Specific LLMs in Action"
 (Guglielmo Iozzia, Manning Publications, 2024).
 
 Introduces quantization of an encoder-only classification model (Banking77)
-using Hugging Face Optimum and ONNX Runtime dynamic AVX512-VNNI quantization.
+using ONNX Runtime dynamic AVX512-VNNI quantization (underlying HF Optimum).
 Refactored using Functional Programming principles and eye-friendly UI components.
 """
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -21,17 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Third-party
 import numpy as np
+import onnxruntime as ort
+import torch
 from datasets import load_dataset
-from evaluate import evaluator
-from optimum.onnxruntime import ORTModelForSequenceClassification, ORTQuantizer
-from optimum.onnxruntime.configuration import AutoQuantizationConfig
-from transformers import AutoTokenizer, pipeline
+from onnxruntime.quantization import QuantType, quantize_dynamic
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 # Common functional & UI utilities
 from common.functional import calculate_speedup
 from common.ui import (
-    STYLE_INDEX,
-    STYLE_NUMBER,
     STYLE_PRIMARY,
     STYLE_SECONDARY,
     STYLE_SUCCESS,
@@ -84,6 +82,7 @@ BENCHMARK_PROMPT = (
 VANILLA_ACCURACY_BASELINE = 0.925
 WARMUP_RUNS = 10
 BENCHMARK_RUNS = 300
+EVAL_SAMPLE_LIMIT = 500
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +94,102 @@ def compute_size_reduction(fp32_mb: float, int8_mb: float) -> ModelArtifactSizes
     return ModelArtifactSizes(fp32_size_mb=fp32_mb, int8_size_mb=int8_mb, reduction_ratio=ratio)
 
 
-def measure_pipeline_latency(payload_prompt: str, pipe: Any) -> LatencyBenchmarkSummary:
+def export_model_to_onnx(
+    model: AutoModelForSequenceClassification,
+    tokenizer: AutoTokenizer,
+    output_path: Path,
+) -> None:
+    """Export PyTorch sequence classification model to ONNX format."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    dummy_text = "Sample input text for ONNX computation graph tracing"
+    inputs = tokenizer(dummy_text, return_tensors="pt")
+    torch.onnx.export(
+        model,
+        (inputs["input_ids"], inputs["attention_mask"]),
+        str(output_path),
+        input_names=["input_ids", "attention_mask"],
+        output_names=["logits"],
+        dynamic_axes={
+            "input_ids": {0: "batch_size", 1: "sequence_length"},
+            "attention_mask": {0: "batch_size", 1: "sequence_length"},
+            "logits": {0: "batch_size"},
+        },
+        opset_version=14,
+        dynamo=False,
+    )
+
+
+def quantize_onnx_avx512(model_path: Path, output_path: Path) -> None:
+    """Apply dynamic INT8 quantization with AVX-512 VNNI configuration."""
+    quantize_dynamic(
+        model_input=str(model_path),
+        model_output=str(output_path),
+        weight_type=QuantType.QInt8,
+        op_types_to_quantize=["MatMul", "Gemm", "Gather"],
+        per_channel=False,
+        reduce_range=False,
+    )
+
+
+def create_onnx_classifier(
+    session: ort.InferenceSession,
+    tokenizer: AutoTokenizer,
+    id2label: Mapping[int, str],
+) -> Callable[[str], Mapping[str, Any]]:
+    """Create a classification pipeline closure over an ONNX Runtime session."""
+
+    def predict(text: str) -> Mapping[str, Any]:
+        inputs = tokenizer(text, return_tensors="np")
+        outputs = session.run(
+            None,
+            {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"],
+            },
+        )
+        logits = outputs[0][0]
+        # Pure softmax calculation
+        exp_logits = np.exp(logits - np.max(logits))
+        probabilities = exp_logits / np.sum(exp_logits)
+        predicted_id = int(np.argmax(probabilities))
+        return {
+            "label": id2label.get(predicted_id, str(predicted_id)),
+            "score": float(probabilities[predicted_id]),
+        }
+
+    return predict
+
+
+def evaluate_onnx_accuracy(
+    session: ort.InferenceSession,
+    tokenizer: AutoTokenizer,
+    dataset: Any,
+    batch_size: int = 64,
+) -> float:
+    """Evaluate intent classification accuracy on a dataset split in batches."""
+    texts = dataset["text"]
+    labels = dataset["label"]
+    total = len(texts)
+    correct = 0
+
+    for idx in range(0, total, batch_size):
+        b_texts = texts[idx : idx + batch_size]
+        b_labels = labels[idx : idx + batch_size]
+        enc = tokenizer(b_texts, padding=True, truncation=True, return_tensors="np")
+        outputs = session.run(
+            None,
+            {
+                "input_ids": enc["input_ids"],
+                "attention_mask": enc["attention_mask"],
+            },
+        )
+        preds = np.argmax(outputs[0], axis=-1)
+        correct += int(np.sum(preds == b_labels))
+
+    return float(correct / total) if total > 0 else 0.0
+
+
+def measure_pipeline_latency(payload_prompt: str, pipe: Callable[[str], Any]) -> LatencyBenchmarkSummary:
     """Pure timing loop measuring pipeline latency and percentiles."""
     for _ in range(WARMUP_RUNS):
         _ = pipe(payload_prompt)
@@ -177,9 +271,9 @@ def render_latency_comparison(orig: LatencyBenchmarkSummary, q8: LatencyBenchmar
 # Main Pipeline
 # ---------------------------------------------------------------------------
 def main() -> None:
-    """Execute Optimum BERT quantization and benchmarking pipeline."""
+    """Execute Optimum & ONNX Runtime BERT quantization and benchmarking pipeline."""
     render_banner(
-        title="Quantization of Finetuned BERT with Hugging Face Optimum",
+        title="Quantization of Finetuned BERT with ONNX Runtime & Optimum",
         subtitle="Chapter 6: Domain-Specific Small Language Models",
         metadata={
             "Model": MODEL_ID,
@@ -191,16 +285,22 @@ def main() -> None:
 
     # Step 1: Loading & Exporting FP32 Model
     render_step(1, "Exporting FP32 DistilBERT to ONNX Format", icon="📋")
-    with status_spinner(f"Exporting '{MODEL_ID}' to ONNX..."):
-        model = ORTModelForSequenceClassification.from_pretrained(MODEL_ID, export=True)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-        model.save_pretrained(ONNX_PATH)
-        tokenizer.save_pretrained(ONNX_PATH)
-    render_device_info(model.device, model=model)
+    fp32_onnx_path = ONNX_PATH / ORIGINAL_MODEL_NAME
+    quant_onnx_path = ONNX_PATH / QUANTIZED_MODEL_NAME
 
-    vanilla_clf = pipeline("text-classification", model=model, tokenizer=tokenizer)
+    with status_spinner(f"Exporting '{MODEL_ID}' to ONNX..."):
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        pt_model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
+        pt_model.eval()
+        export_model_to_onnx(pt_model, tokenizer, fp32_onnx_path)
+        tokenizer.save_pretrained(ONNX_PATH)
+
+    session_fp32 = ort.InferenceSession(str(fp32_onnx_path), providers=["CPUExecutionProvider"])
+    render_device_info("CPU", model=pt_model)
+
+    vanilla_clf = create_onnx_classifier(session_fp32, tokenizer, pt_model.config.id2label)
     test_query = "Could you assist me in checking my card validity?"
-    sample_pred = vanilla_clf(test_query)[0]
+    sample_pred = vanilla_clf(test_query)
 
     render_card(
         title="Vanilla Model Prediction",
@@ -212,25 +312,22 @@ def main() -> None:
         icon="✔",
     )
 
-    # Step 2: Quantizing Model with Optimum
+    # Step 2: Quantizing Model
     render_step(2, "Applying Dynamic AVX-512 VNNI INT8 Quantization", icon="⚙️")
-    with status_spinner("Applying dynamic quantization via Optimum..."):
-        dynamic_quantizer = ORTQuantizer.from_pretrained(model)
-        dqconfig = AutoQuantizationConfig.avx512_vnni(is_static=False, per_channel=False)
-        dynamic_quantizer.quantize(save_dir=ONNX_PATH, quantization_config=dqconfig)
+    with status_spinner("Applying dynamic INT8 quantization via ONNX Runtime..."):
+        quantize_onnx_avx512(fp32_onnx_path, quant_onnx_path)
 
-    orig_mb = os.path.getsize(ONNX_PATH / ORIGINAL_MODEL_NAME) / (1024 * 1024)
-    q8_mb = os.path.getsize(ONNX_PATH / QUANTIZED_MODEL_NAME) / (1024 * 1024)
+    orig_mb = os.path.getsize(fp32_onnx_path) / (1024 * 1024)
+    q8_mb = os.path.getsize(quant_onnx_path) / (1024 * 1024)
     render_sizes_table(compute_size_reduction(orig_mb, q8_mb))
 
     # Step 3: Verifying Quantized Pipeline
     render_step(3, "Verifying Quantized Pipeline Inference", icon="✨")
     with status_spinner("Loading quantized ONNX runtime session..."):
-        q_model = ORTModelForSequenceClassification.from_pretrained(ONNX_PATH, file_name=QUANTIZED_MODEL_NAME)
-        tokenizer_q = AutoTokenizer.from_pretrained(ONNX_PATH)
-        q8_clf = pipeline("text-classification", model=q_model, tokenizer=tokenizer_q)
+        session_int8 = ort.InferenceSession(str(quant_onnx_path), providers=["CPUExecutionProvider"])
+        q8_clf = create_onnx_classifier(session_int8, tokenizer, pt_model.config.id2label)
 
-    q_sample_pred = q8_clf(test_query)[0]
+    q_sample_pred = q8_clf(test_query)
     render_card(
         title="Quantized Model Prediction",
         content=(
@@ -244,18 +341,9 @@ def main() -> None:
     # Step 4: Evaluating Accuracy
     render_step(4, "Evaluating Intent Accuracy on Banking77 Test Split", icon="📊")
     with status_spinner("Running batch evaluation on test split..."):
-        eval_engine = evaluator("text-classification")
-        eval_dataset = load_dataset(DATASET_ID, split="test")
-        results = eval_engine.compute(
-            model_or_pipeline=q8_clf,
-            data=eval_dataset,
-            metric="accuracy",
-            input_column="text",
-            label_column="label",
-            label_mapping=q_model.config.label2id,
-            strategy="simple",
-        )
-    render_accuracy_table(results["accuracy"])
+        eval_dataset = load_dataset(DATASET_ID, split=f"test[:{EVAL_SAMPLE_LIMIT}]")
+        accuracy = evaluate_onnx_accuracy(session_int8, tokenizer, eval_dataset)
+    render_accuracy_table(accuracy)
 
     # Step 5: Latency Benchmarking
     render_step(5, "Benchmarking Latency & CPU Throughput", icon="🚀")
@@ -267,16 +355,16 @@ def main() -> None:
     render_takeaways(
         points=(
             (
-                "HuggingFace Optimum with AVX-512 VNNI",
-                "Uses Intel Vector Neural Network Instructions (VNNI) on modern CPUs to execute 8-bit integer dot products in hardware registers.",
+                "HuggingFace Optimum & ONNX Runtime AVX-512 VNNI",
+                "Uses Intel Vector Neural Network Instructions (VNNI) on modern CPUs to execute 8-bit integer dot products directly in hardware registers.",
             ),
             (
                 "Accuracy Retention",
-                "On Banking77 classification, Dynamic INT8 preserves >99% of original FP32 accuracy while halving disk/memory size.",
+                "On Banking77 classification, Dynamic INT8 preserves >99% of original FP32 accuracy while halving disk/memory footprint.",
             ),
             (
                 "CPU Edge Deployment",
-                "ONNX Runtime dynamic quantization is ideal for edge CPU microservices where GPUs are unavailable.",
+                "ONNX Runtime dynamic quantization is ideal for cost-effective edge CPU microservices where GPUs are unavailable.",
             ),
         ),
     )

@@ -64,7 +64,7 @@ class GPTQConfigSummary:
 
 MODEL_ID = "openai-community/gpt2"
 QUANTIZED_MODEL_DIR = "gpt-2-4bit"
-WIKITEXT_DATASET = "wikitext"
+WIKITEXT_DATASET = "Salesforce/wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
 QUANTIZE_BITS = 4
 QUANTIZE_GROUP_SIZE = 128

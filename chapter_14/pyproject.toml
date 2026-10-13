@@ -1,0 +1,14 @@
+[project]
+name = "chapter-14-graph-rag"
+version = "0.1.0"
+description = "Chapter 14: Graph RAG & Hybrid Retrieval"
+dependencies = [
+    "transformers>=5.15.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+    "networkx>=3.6.1",
+    "ollama>=0.6.2",
+    "rank-bm25>=0.2.2",
+    "duckduckgo-search>=8.1.1",
+]

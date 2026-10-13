@@ -1,0 +1,10 @@
+[project]
+name = "chapter-8-biology-materials"
+version = "0.1.0"
+description = "Chapter 8: Domain SLMs in Biology & Material Science"
+dependencies = [
+    "transformers>=5.15.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+]

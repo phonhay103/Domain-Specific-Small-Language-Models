@@ -1,0 +1,12 @@
+[project]
+name = "chapter-11-production-serving"
+version = "0.1.0"
+description = "Chapter 11: Production Serving & Compilation"
+dependencies = [
+    "transformers>=5.15.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+    "huggingface-hub>=1.27.0",
+    "vllm>=0.5.0",
+]

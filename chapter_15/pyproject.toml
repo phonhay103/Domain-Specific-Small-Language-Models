@@ -1,0 +1,12 @@
+[project]
+name = "chapter-15-test-time-reasoning"
+version = "0.1.0"
+description = "Chapter 15: Test-Time Reasoning & GRPO"
+dependencies = [
+    "transformers>=5.15.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+    "trl>=1.10.0",
+    "peft>=0.20.0",
+]

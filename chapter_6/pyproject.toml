@@ -1,0 +1,15 @@
+[project]
+name = "chapter-6-quantization"
+version = "0.1.0"
+description = "Chapter 6: Quantization Spectrum"
+dependencies = [
+    "transformers>=5.15.0",
+    "optimum>=2.3.0",
+    "onnxruntime>=1.28.0",
+    "onnx>=1.22.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+    "matplotlib>=3.11.1",
+    "gptqmodel==7.3.2",
+]

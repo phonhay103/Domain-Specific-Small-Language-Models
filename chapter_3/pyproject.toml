@@ -1,0 +1,13 @@
+[project]
+name = "chapter-3-domain-customization"
+version = "0.1.0"
+description = "Chapter 3: Domain Customization"
+dependencies = [
+    "datasets>=5.0.1",
+    "transformers>=5.15.0",
+    "peft>=0.20.0",
+    "optuna>=4.9.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+]

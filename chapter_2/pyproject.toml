@@ -1,0 +1,13 @@
+[project]
+name = "chapter-2-foundations"
+version = "0.1.0"
+description = "Chapter 2: Foundations & Fine-Tuning"
+dependencies = [
+    "faiss-cpu>=1.15.0",
+    "datasets>=5.0.1",
+    "transformers>=5.15.0",
+    "peft>=0.20.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "rich>=15.0.0",
+]

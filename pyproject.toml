@@ -61,6 +61,13 @@ dev = [
     "ty>=0.0.72",
 ]
 
+[tool.uv]
+# Supply-chain lag: a release must be 7 days old before the resolver may pick
+# it. Malicious or broken uploads are usually yanked within hours, so waiting
+# turns the registry's own recall into our safety net. Relative on purpose —
+# it is re-evaluated at every lock, not frozen to one date.
+exclude-newer = "7 days"
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

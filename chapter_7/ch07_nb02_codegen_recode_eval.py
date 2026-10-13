@@ -39,10 +39,8 @@ from typing import Dict, List, Optional, Union
 # Ensure root workspace is on pythonpath
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import fire
 import numpy as np
 import torch
-import tqdm
 from human_eval.data import HUMAN_EVAL, read_problems, stream_jsonl, write_jsonl
 from tqdm import tqdm as tqdm_progress
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
@@ -68,9 +66,7 @@ MODEL_ID = "Salesforce/codegen-350M-mono"
 PROBLEMS_FILE_PATH = "datasets/nominal/HumanEval.jsonl"
 OUTPUT_DIR = "experiments"
 FPATH_FORMAT = os.path.join(OUTPUT_DIR, "output", "taskid-{task_idx}-gen{completion_idx}.json")
-DEFAULT_SAMPLE_DIR = "/content/experiments/output/"
-DEFAULT_PROBLEM_FILE = "/content/datasets/nominal/HumanEval.jsonl"
-TEMP_SAMPLES_FILE = "/content/experiments/temp_samples.jsonl"
+TEMP_SAMPLES_FILE = "experiments/temp_samples.jsonl"
 
 # Generation hyperparameters
 PAD_TOKEN_ID = 50256
@@ -82,9 +78,7 @@ DEFAULT_N_WORKERS = 2
 DEFAULT_K_VALUES = "1,10,100"
 CODE_GENERATION_LANGUAGE = "python"
 
-
 # ---- Data loading utilities ----
-
 
 def read_problems_local(eval_file: str) -> dict[str, dict]:
     """Load problems from a JSONL file, keyed by task_id."""
@@ -113,7 +107,6 @@ def count_files_present_nonempty(list_fname: list[str]):
 
 # ---- Token position utilities ----
 
-
 def get_token_position_by_string(
     target_str: str,
     outputs,
@@ -137,7 +130,6 @@ def get_token_position_by_string(
 
 
 # ---- AST-based code validation ----
-
 
 def is_valid_python(code: str):
     """Parse code with the ast module; return parsed AST or False on failure."""
@@ -170,7 +162,6 @@ def get_function_from_ast(parsed_code, code: str, option: str = "func_ast_last")
 
 
 # ---- Code generation filtering ----
-
 
 def filter_valid_code(
     true_str_input: str,
@@ -279,12 +270,10 @@ def filter_valid_code(
                     mean_logp=-1e8,
                 )
             )
-
     return samples
 
 
 # ---- HumanEval correctness evaluation ----
-
 
 def custom_check_correctness(
     problem: dict,
@@ -349,16 +338,18 @@ def custom_check_correctness(
 @contextlib.contextmanager
 def time_limit(seconds: float):
     """Context manager that raises TimeoutException after *seconds*."""
+    # Use threading-based timeout for cross-platform compatibility
+    import threading
 
-    def signal_handler(signum, frame):
+    def signal_handler():
         raise TimeoutException("Timed out!")
 
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    signal.signal(signal.SIGALRM, signal_handler)
+    timer = threading.Timer(seconds, signal_handler)
+    timer.start()
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        timer.cancel()
 
 
 @contextlib.contextmanager
@@ -417,6 +408,7 @@ def chdir(root: str):
 
 
 def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
+    """Lightweight sandbox - only restricts dangerous operations, not basic builtins."""
     if maximum_memory_bytes is not None:
         import resource
 
@@ -427,20 +419,13 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
 
     faulthandler.disable()
 
-    import builtins
-
-    builtins.exit = None
-    builtins.quit = None
-
+    # Only disable truly dangerous operations, keep basic builtins
     import os
-
-    os.environ["OMP_NUM_THREADS"] = "1"
 
     os.kill = None
     os.system = None
     os.putenv = None
     os.remove = None
-    os.removedirs = None
     os.rmdir = None
     os.fchdir = None
     os.setuid = None
@@ -452,16 +437,9 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     os.truncate = None
     os.replace = None
     os.unlink = None
-    os.fchmod = None
-    os.fchown = None
     os.chmod = None
     os.chown = None
     os.chroot = None
-    os.fchdir = None
-    os.lchflags = None
-    os.lchmod = None
-    os.lchown = None
-    os.getcwd = None
     os.chdir = None
 
     import shutil
@@ -474,17 +452,8 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
 
     subprocess.Popen = None  # type: ignore
 
-    __builtins__["help"] = None
-
-    sys.modules["ipdb"] = None
-    sys.modules["joblib"] = None
-    sys.modules["resource"] = None
-    sys.modules["psutil"] = None
-    sys.modules["tkinter"] = None
-
 
 # ---- pass@k estimation ----
-
 
 def estimate_pass_at_k(
     num_samples: int | list[int] | np.ndarray,
@@ -527,7 +496,7 @@ def custom_evaluate_functional_correctness(
         results = defaultdict(list)
 
         console.print("[cyan]Submitting test suites for evaluation...[/cyan]")
-        for sample in tqdm.tqdm(stream_jsonl(sample_file)):
+        for sample in tqdm_progress(stream_jsonl(sample_file)):
             task_id = sample["task_id"]
             completion = sample["completion"]
             args = (problems[task_id], completion, timeout, completion_id[task_id])
@@ -538,7 +507,7 @@ def custom_evaluate_functional_correctness(
 
         assert len(completion_id) == len(problems), "Some problems are not attempted."
 
-        for future in tqdm.tqdm(as_completed(futures), total=len(futures), desc="Executing unit tests"):
+        for future in tqdm_progress(as_completed(futures), total=len(futures), desc="Executing unit tests"):
             result = future.result()
             results[result["task_id"]].append((result["completion_id"], result))
 
@@ -570,7 +539,6 @@ def custom_evaluate_functional_correctness(
 
 
 # ---- Code generation pipeline ----
-
 
 def load_model_and_tokenizer(model_id: str, device: str):
     """Load the causal LM and its tokenizer from the HF Hub onto *device*."""
@@ -625,6 +593,7 @@ def generate_code_samples(
             output_dict = model.generate(input_ids, generation_config=generation_config)
 
             sequences = output_dict.sequences
+            # scores length equals number of generated tokens
             initial_context_length = len(sequences[0]) - len(output_dict.scores)
 
             predictions_post_eos = filter_valid_code(
@@ -648,15 +617,14 @@ def generate_code_samples(
                     json.dump(prediction, _f)
 
 
-# ---- Entry point (fire-compatible) ----
+# ---- Entry point ----
 
-
-def entry_point(
-    sample_dir: str = DEFAULT_SAMPLE_DIR,
+def evaluate_samples(
+    sample_dir: str = "experiments/output/",
     k: str = DEFAULT_K_VALUES,
     n_workers: int = DEFAULT_N_WORKERS,
     timeout: float = DEFAULT_TIMEOUT,
-    problem_file: str = DEFAULT_PROBLEM_FILE,
+    problem_file: str = PROBLEMS_FILE_PATH,
 ) -> None:
     """Evaluate functional correctness of generated samples."""
     k_list = list(map(int, k.split(",")))
@@ -670,6 +638,7 @@ def entry_point(
             except json.JSONDecodeError:
                 continue
 
+    os.makedirs(os.path.dirname(TEMP_SAMPLES_FILE), exist_ok=True)
     with open(TEMP_SAMPLES_FILE, "w", encoding="utf8") as f:
         for sample in samples:
             json.dump(sample, f)
@@ -703,6 +672,17 @@ def main() -> None:
     render_step(1, "Loading Model and HumanEval Problem Set", icon="📋")
     model, tokenizer = load_model_and_tokenizer(MODEL_ID, device)
     render_device_info(device, model=model)
+
+    # Validate problems file exists
+    if not os.path.exists(PROBLEMS_FILE_PATH):
+        render_card(
+            "Missing Dataset",
+            f"HumanEval dataset not found at [text.highlight]{PROBLEMS_FILE_PATH}[/text.highlight].\n"
+            "Please run the setup commands from the docstring to download it.",
+            icon="⚠️",
+        )
+        return
+
     problems = read_problems_local(PROBLEMS_FILE_PATH)
     render_card(
         "Problems Loaded",
@@ -713,8 +693,8 @@ def main() -> None:
     render_step(2, "Generating Code Samples & Performing AST Filtering", icon="⚙️")
     generate_code_samples(model, tokenizer, problems, device)
 
-    render_step(3, "Evaluating Functional Correctness via Fire CLI", icon="📊")
-    fire.Fire(entry_point)
+    render_step(3, "Evaluating Functional Correctness", icon="📊")
+    evaluate_samples()
 
     render_takeaways(
         points=(

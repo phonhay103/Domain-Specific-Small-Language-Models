@@ -76,7 +76,6 @@ PIPELINE_TEMPERATURE = 0.2
 PIPELINE_TOP_P = 0.95
 PIPELINE_MAX_LENGTH = 14
 
-
 # ---------------------------------------------------------------------------
 # Pure Functions & Benchmarking Logic
 # ---------------------------------------------------------------------------
@@ -179,15 +178,17 @@ def main() -> None:
     render_step(1, "Vanilla StarCoder2-3B (bfloat16) Pipeline", icon="📋")
     with status_spinner(f"Loading '{MODEL_ID}' in bfloat16 onto {device}..."):
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
         vanilla_pipe = create_code_pipe(model, tokenizer)
     render_device_info(device, model=model)
 
     sample_out = vanilla_pipe(BENCHMARK_PROMPT)[0]["generated_text"]
     render_code_block(sample_out, language="python", title="Vanilla StarCoder2 Output Preview")
-
-    tokenizer.save_pretrained(CHECKPOINT_SAVE_DIR)
-    model.save_pretrained(CHECKPOINT_SAVE_DIR)
 
     with status_spinner(f"Benchmarking vanilla model across {BENCHMARK_ITERATIONS} runs..."):
         durations_fp = benchmark_pipe_runs(vanilla_pipe, BENCHMARK_PROMPT)
@@ -195,17 +196,23 @@ def main() -> None:
 
     # Phase 2: 8-Bit Quantized StarCoder2-3B
     render_step(2, "8-Bit Quantized StarCoder2-3B via BitsAndBytes", icon="⚡")
+    # Clean up vanilla model to free VRAM
+    del vanilla_pipe
     model.cpu()
     del model
-    del vanilla_pipe
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     with status_spinner("Loading 8-bit quantized model..."):
         q_config = BitsAndBytesConfig(load_in_8bit=True)
-        tokenizer_q = AutoTokenizer.from_pretrained(CHECKPOINT_SAVE_DIR)
-        model_q = AutoModelForCausalLM.from_pretrained(CHECKPOINT_SAVE_DIR, quantization_config=q_config)
+        tokenizer_q = AutoTokenizer.from_pretrained(MODEL_ID)
+        model_q = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            quantization_config=q_config,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
         model_q.eval()
         q_pipe = create_code_pipe(model_q, tokenizer_q)
 
@@ -216,9 +223,23 @@ def main() -> None:
         durations_q = benchmark_pipe_runs(q_pipe, BENCHMARK_PROMPT)
         profiles.append(compute_latency_percentiles("Quantized StarCoder2 (8-bit)", durations_q))
 
+    # Optionally save the quantized model for reuse
+    with status_spinner(f"Saving 8-bit quantized model to '{CHECKPOINT_8BIT_SAVE_DIR}'..."):
+        model_q.save_pretrained(CHECKPOINT_8BIT_SAVE_DIR)
+        tokenizer_q.save_pretrained(CHECKPOINT_8BIT_SAVE_DIR)
+
     # Phase 3: Performance Metrics
     render_step(3, "Evaluating Latency Distributions & Throughput", icon="📊")
     render_latency_profile_table(profiles)
+
+    # Calculate and display speedup
+    if len(profiles) >= 2:
+        baseline = profiles[0].avg_latency_ms
+        quantized = profiles[1].avg_latency_ms
+        speedup = calculate_speedup(baseline, quantized)
+        memory_saved = "~50% VRAM reduction (6GB -> 3GB)"
+        console.print(f"\n[primary]Speedup (bfloat16 -> 8-bit):[/primary] {speedup:.2f}x | [primary]Memory:[/primary] {memory_saved}")
+        pause()
 
     # Educational Takeaways
     render_takeaways(

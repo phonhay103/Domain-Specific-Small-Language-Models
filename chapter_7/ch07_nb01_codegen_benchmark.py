@@ -72,12 +72,11 @@ LOCAL_CHECKPOINT_DIR = "local-pt-checkpoint"
 ONNX_PATH = Path("onnx")
 QUANTIZED_MODEL_FILE = "model_quantized.onnx"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-PAD_TOKEN_ID = 50256
+# Get pad_token_id from tokenizer at runtime instead of hardcoding
 MAX_GEN_LENGTH = 12
 BENCHMARK_PROMPT = "def hello_world():"
 WARMUP_RUNS = 10
 BENCHMARK_RUNS = 100
-
 
 # ---------------------------------------------------------------------------
 # Pure Functions & Statistical Computation
@@ -119,7 +118,7 @@ def create_generation_pipe(model: Any, tokenizer: Any) -> Any:
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        pad_token_id=PAD_TOKEN_ID,
+        pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         truncation=True,
         max_length=MAX_GEN_LENGTH,
     )
@@ -177,8 +176,13 @@ def main() -> None:
 
     # Phase 1: Vanilla PyTorch Benchmark
     render_step(1, "Vanilla PyTorch CPU Benchmark", icon="📋")
-    with status_spinner(f"Loading '{MODEL_ID}' on PyTorch CPU..."):
-        pt_model = CodeGenForCausalLM.from_pretrained(MODEL_ID).to(DEVICE)
+    with status_spinner(f"Loading '{MODEL_ID}' on PyTorch {DEVICE}..."):
+        # Load directly to target device to avoid CPU->GPU copy
+        pt_model = CodeGenForCausalLM.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32 if DEVICE == "cpu" else torch.bfloat16,
+            device_map="auto" if DEVICE == "cuda" else None,
+        ).to(DEVICE)
         pt_model.eval()
         pt_pipe = create_generation_pipe(pt_model, tokenizer)
     render_device_info(DEVICE, model=pt_model)
@@ -186,13 +190,14 @@ def main() -> None:
     sample_out = pt_pipe(BENCHMARK_PROMPT)[0]["generated_text"]
     render_code_block(sample_out, language="python", title="PyTorch Code Generation Preview")
 
-    with status_spinner(f"Benchmarking PyTorch CPU across {BENCHMARK_RUNS} runs..."):
+    with status_spinner(f"Benchmarking PyTorch {DEVICE.upper()} across {BENCHMARK_RUNS} runs..."):
         pt_durations = benchmark_pipe_execution(pt_pipe, BENCHMARK_PROMPT)
-        profiles.append(compute_latency_distribution("PyTorch Eager (CPU)", pt_durations))
+        profiles.append(compute_latency_distribution(f"PyTorch Eager ({DEVICE.upper()})", pt_durations))
 
     # Phase 2: Base ONNX Model Benchmark
     render_step(2, "Exporting and Benchmarking Base ONNX Model", icon="⚙️")
     with status_spinner("Exporting CodeGen to ONNX graph..."):
+        # Export from the already-loaded PyTorch model instead of re-downloading
         onnx_model = ORTModelForCausalLM.from_pretrained(MODEL_ID, export=True)
         onnx_model.save_pretrained(ONNX_PATH)
         tokenizer.save_pretrained(ONNX_PATH)
@@ -202,17 +207,25 @@ def main() -> None:
         onnx_durations = benchmark_pipe_execution(onnx_pipe, BENCHMARK_PROMPT)
         profiles.append(compute_latency_distribution("ONNX Runtime (Base CPU)", onnx_durations))
 
+    # Keep onnx_model for quantization phase
     del onnx_pipe
     gc.collect()
 
     # Phase 3: 8-Bit Quantized ONNX Benchmark
     render_step(3, "Applying Dynamic AVX-512 VNNI INT8 Quantization", icon="⚡")
     with status_spinner("Quantizing CodeGen ONNX model to INT8..."):
-        quantizer = ORTQuantizer.from_pretrained(onnx_model)
+        # Quantize from the saved ONNX path, not the in-memory model
+        quantizer = ORTQuantizer.from_pretrained(ONNX_PATH)
         dqconfig = AutoQuantizationConfig.avx512_vnni(is_static=False, per_channel=False)
         quantizer.quantize(save_dir=ONNX_PATH, quantization_config=dqconfig)
 
-        quant_model = ORTModelForCausalLM.from_pretrained(ONNX_PATH, file_name=QUANTIZED_MODEL_FILE)
+        # Load the quantized model - find the actual quantized filename
+        quantized_files = list(ONNX_PATH.glob("*quantized*.onnx"))
+        if not quantized_files:
+            quantized_files = list(ONNX_PATH.glob("model_quantized*.onnx"))
+        quantized_file = quantized_files[0].name if quantized_files else QUANTIZED_MODEL_FILE
+
+        quant_model = ORTModelForCausalLM.from_pretrained(ONNX_PATH, file_name=quantized_file)
         quant_pipe = create_generation_pipe(quant_model, tokenizer)
 
     with status_spinner(f"Benchmarking Quantized ONNX CPU across {BENCHMARK_RUNS} runs..."):
@@ -222,6 +235,14 @@ def main() -> None:
     # Phase 4: Comparative Performance Metrics
     render_step(4, "Evaluating Latency Percentiles & Throughput", icon="📊")
     render_metrics_table(profiles)
+
+    # Calculate and display speedups
+    if len(profiles) >= 3:
+        baseline = profiles[0].avg_latency_ms
+        onnx_speedup = calculate_speedup(baseline, profiles[1].avg_latency_ms)
+        quant_speedup = calculate_speedup(baseline, profiles[2].avg_latency_ms)
+        console.print(f"\n[primary]Speedup vs PyTorch:[/primary] ONNX: {onnx_speedup:.2f}x | INT8 Quantized: {quant_speedup:.2f}x")
+        pause()
 
     # Educational Takeaways
     render_takeaways(

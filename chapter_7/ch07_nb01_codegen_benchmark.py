@@ -78,6 +78,7 @@ BENCHMARK_PROMPT = "def hello_world():"
 WARMUP_RUNS = 10
 BENCHMARK_RUNS = 100
 
+
 # ---------------------------------------------------------------------------
 # Pure Functions & Statistical Computation
 # ---------------------------------------------------------------------------
@@ -241,7 +242,9 @@ def main() -> None:
         baseline = profiles[0].avg_latency_ms
         onnx_speedup = calculate_speedup(baseline, profiles[1].avg_latency_ms)
         quant_speedup = calculate_speedup(baseline, profiles[2].avg_latency_ms)
-        console.print(f"\n[primary]Speedup vs PyTorch:[/primary] ONNX: {onnx_speedup:.2f}x | INT8 Quantized: {quant_speedup:.2f}x")
+        console.print(
+            f"\n[primary]Speedup vs PyTorch:[/primary] ONNX: {onnx_speedup:.2f}x | INT8 Quantized: {quant_speedup:.2f}x"
+        )
         pause()
 
     # Educational Takeaways

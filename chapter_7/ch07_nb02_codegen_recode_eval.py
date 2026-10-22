@@ -80,6 +80,7 @@ CODE_GENERATION_LANGUAGE = "python"
 
 # ---- Data loading utilities ----
 
+
 def read_problems_local(eval_file: str) -> dict[str, dict]:
     """Load problems from a JSONL file, keyed by task_id."""
     return {str(task["task_id"]): task for task in stream_jsonl_local(eval_file)}
@@ -107,6 +108,7 @@ def count_files_present_nonempty(list_fname: list[str]):
 
 # ---- Token position utilities ----
 
+
 def get_token_position_by_string(
     target_str: str,
     outputs,
@@ -130,6 +132,7 @@ def get_token_position_by_string(
 
 
 # ---- AST-based code validation ----
+
 
 def is_valid_python(code: str):
     """Parse code with the ast module; return parsed AST or False on failure."""
@@ -162,6 +165,7 @@ def get_function_from_ast(parsed_code, code: str, option: str = "func_ast_last")
 
 
 # ---- Code generation filtering ----
+
 
 def filter_valid_code(
     true_str_input: str,
@@ -274,6 +278,7 @@ def filter_valid_code(
 
 
 # ---- HumanEval correctness evaluation ----
+
 
 def custom_check_correctness(
     problem: dict,
@@ -455,6 +460,7 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
 
 # ---- pass@k estimation ----
 
+
 def estimate_pass_at_k(
     num_samples: int | list[int] | np.ndarray,
     num_correct: list[int] | np.ndarray,
@@ -540,6 +546,7 @@ def custom_evaluate_functional_correctness(
 
 # ---- Code generation pipeline ----
 
+
 def load_model_and_tokenizer(model_id: str, device: str):
     """Load the causal LM and its tokenizer from the HF Hub onto *device*."""
     with console.status(f"[bold green]Loading {model_id} onto {device}..."):
@@ -618,6 +625,7 @@ def generate_code_samples(
 
 
 # ---- Entry point ----
+
 
 def evaluate_samples(
     sample_dir: str = "experiments/output/",

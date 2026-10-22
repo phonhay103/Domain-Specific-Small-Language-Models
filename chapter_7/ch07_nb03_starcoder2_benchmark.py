@@ -76,6 +76,7 @@ PIPELINE_TEMPERATURE = 0.2
 PIPELINE_TOP_P = 0.95
 PIPELINE_MAX_LENGTH = 14
 
+
 # ---------------------------------------------------------------------------
 # Pure Functions & Benchmarking Logic
 # ---------------------------------------------------------------------------
@@ -238,7 +239,9 @@ def main() -> None:
         quantized = profiles[1].avg_latency_ms
         speedup = calculate_speedup(baseline, quantized)
         memory_saved = "~50% VRAM reduction (6GB -> 3GB)"
-        console.print(f"\n[primary]Speedup (bfloat16 -> 8-bit):[/primary] {speedup:.2f}x | [primary]Memory:[/primary] {memory_saved}")
+        console.print(
+            f"\n[primary]Speedup (bfloat16 -> 8-bit):[/primary] {speedup:.2f}x | [primary]Memory:[/primary] {memory_saved}"
+        )
         pause()
 
     # Educational Takeaways

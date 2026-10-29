@@ -6,7 +6,7 @@ dependencies = [
     "optimum==1.13.0",
     "onnxruntime>=1.28.0",
     "onnx>=1.22.0",
-    "transformers==4.45.2",
+    "transformers==5.10.1",
     "tokenizers==0.20.3",
     "torch>=2.13.0",
     "tqdm>=4.70.0",
